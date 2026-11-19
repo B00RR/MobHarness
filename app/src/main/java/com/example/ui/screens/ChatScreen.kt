@@ -1,5 +1,7 @@
 package com.example.ui.screens
 
+import com.example.agent.phoneuse.MobHarnAccessibilityService
+import com.example.data.prefs.ToolGroup
 import android.Manifest
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -171,6 +173,8 @@ fun ChatScreen(
     val pendingApproval by viewModel.pendingApproval.collectAsStateWithLifecycle()
     val incomingSharedPrompt by viewModel.incomingSharedPrompt.collectAsStateWithLifecycle()
 
+    val accessibilityConnected by MobHarnAccessibilityService.isConnected.collectAsStateWithLifecycle()
+    val prefs by viewModel.preferences.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
     val clipboard = LocalClipboardManager.current
@@ -535,6 +539,12 @@ fun ChatScreen(
                                 },
                                 modifier = Modifier.testTag("compact_context_button")
                             )
+                            if (!accessibilityConnected && ToolGroup.PHONE_USE.id in prefs.enabledToolGroups) {
+                                DropdownMenuItem(text = { Text("Apri Accessibilità") }, onClick = {
+                                    showTopOverflow = false
+                                    MobHarnAccessibilityService.openAccessibilitySettings(context)
+                                })
+                            }
                             DropdownMenuItem(
                                 text = { Text("Apri Studio") },
                                 leadingIcon = { Icon(Icons.Default.Folder, contentDescription = null) },

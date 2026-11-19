@@ -1,5 +1,6 @@
 package com.example.agent.tools
 
+import com.example.agent.phoneuse.MobHarnAccessibilityService
 import com.example.agent.automation.AutomationScheduler
 import com.example.agent.sandbox.CodeSandboxRunner
 import com.example.data.MobHarnRepository
@@ -760,14 +761,9 @@ class MobHarnToolkitRegistry(
     val automationTools = AutomationToolSet(repository, scheduler, monitor)
     val selfEvolveTools = SelfEvolveToolSet(repository, sandbox, monitor)
     val phoneUseTools = PhoneUseToolSet(monitor)
-
-    /**
-     * Precision-first tool router for edge models (Gemma 4 E2B/E4B).
-     * Pure conversational & date/time turns get ZERO tool schemas (2-3x faster, lower RAM, sharper answers).
-     * Domain tool groups and Memory/Skills tools are attached only when the prompt genuinely needs them.
-     */
+    /** Offer phone controls only while the user-enabled accessibility service is connected. */
     fun selectRoutedToolGroups(userPrompt: String, enabledGroups: Set<String>): Set<String> {
-        return routeToolGroupsForPrompt(userPrompt, enabledGroups)
+        return routeToolGroupsForPrompt(userPrompt, enabledGroups, MobHarnAccessibilityService.isConnected.value)
     }
 
     fun buildEnabledToolProviders(enabledGroups: Set<String>): List<ToolProvider> {
@@ -787,7 +783,8 @@ class MobHarnToolkitRegistry(
      * Direct tracked dispatcher used by LiteRtRuntimeManager's Tool-Call Recovery layer whenever
      * LiteRT-LM's strict C++ ANTLR parser fails on a slightly malformed call (e.g. `"` instead of `<|"|>`).
      */
-    fun invokeToolByName(rawName: String, args: Map<String, Any?>): String? {
+    fun invokeToolByName(rawName: String, args: Map<String, Any?>, routedGroups: Set<String>): String? {
+        val phone = phoneUseTools.takeIf { ToolGroup.PHONE_USE.id in routedGroups }
         val normalized = ToolCallRecoveryParser.normalizeToolName(rawName)
         if (normalized.isBlank()) return null
 
@@ -1037,23 +1034,23 @@ class MobHarnToolkitRegistry(
 
             // Phone-Use
             "read_screen_ui", "read_screen" ->
-                phoneUseTools.read_screen_ui(intArg("maxNodes", "max_nodes", default = 80))
+                phone?.read_screen_ui(intArg("maxNodes", "max_nodes", default = 80))
             "tap_screen_text", "tap_element" ->
-                phoneUseTools.tap_screen_text(str("targetText", "target_text", "text", "label"))
+                phone?.tap_screen_text(str("targetText", "target_text", "text", "label"))
             "tap_screen_coords", "tap_coordinates" ->
-                phoneUseTools.tap_screen_coords(
+                phone?.tap_screen_coords(
                     x = intArg("x", default = 0),
                     y = intArg("y", default = 0)
                 )
             "type_screen_text", "type_text" ->
-                phoneUseTools.type_screen_text(
+                phone?.type_screen_text(
                     fieldHint = str("fieldHint", "field_hint", "hint"),
                     text = str("text", "value")
                 )
             "scroll_screen" ->
-                phoneUseTools.scroll_screen(str("direction", default = "down"))
+                phone?.scroll_screen(str("direction", default = "down"))
             "phone_global_action", "system_navigate" ->
-                phoneUseTools.phone_global_action(str("action", "command", default = "home"))
+                phone?.phone_global_action(str("action", "command", default = "home"))
 
             else -> null
         }
@@ -1097,12 +1094,7 @@ fun decodeToolTracesFromJson(json: String): List<ToolCallTrace> {
     }.getOrDefault(emptyList())
 }
 
-/**
- * Pure, unit-testable precision tool router for edge models (Gemma 4 E2B/E4B).
- * Keeps plain chat & local date/time turns completely tool-free (fast, low RAM, zero schema confusion),
- * and binds only the exact tool groups (max 2) genuinely needed for the user's prompt.
- */
-fun routeToolGroupsForPrompt(userPrompt: String, enabledGroups: Set<String>): Set<String> {
+fun routeToolGroupsForPrompt(userPrompt: String, enabledGroups: Set<String>, accessibilityConnected: Boolean): Set<String> {
     val p = userPrompt.lowercase().trim()
     if (p.isBlank()) return emptySet()
 
@@ -1142,16 +1134,6 @@ fun routeToolGroupsForPrompt(userPrompt: String, enabledGroups: Set<String>): Se
         )
     ) {
         addIfEnabled(ToolGroup.CODING)
-    }
-
-    // 3. Phone-Use (Accessibility UI control)
-    if (p.containsAny(
-            "schermo", "screen", "clicca", "tocca", "premi", "tap", "scorri", "scroll",
-            "digita", "scrivi nel campo", "leggi lo schermo", "cosa vedi", "accessibilit",
-            "screenshot"
-        )
-    ) {
-        addIfEnabled(ToolGroup.PHONE_USE)
     }
 
     // 4. Android System Actions
@@ -1206,6 +1188,7 @@ fun routeToolGroupsForPrompt(userPrompt: String, enabledGroups: Set<String>): Se
         addIfEnabled(ToolGroup.MEMORY)
     }
 
-    // Cap to at most 2 groups so Gemma 4 E2B/E4B context remains fast, lean, and accurate
-    return selected.take(2).toCollection(linkedSetOf())
+    return selected.take(2).toMutableSet().apply {
+        if (accessibilityConnected && ToolGroup.PHONE_USE.id in enabledGroups) add(ToolGroup.PHONE_USE.id)
+    }
 }

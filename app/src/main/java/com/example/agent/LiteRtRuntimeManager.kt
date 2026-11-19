@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Build
 import android.os.Process
 import com.example.agent.tools.MobHarnToolkitRegistry
+import com.example.data.prefs.ToolGroup
 import com.example.agent.tools.ParsedToolCall
 import com.example.agent.tools.ToolCallRecoveryParser
 import com.example.data.db.ModelProfileEntity
@@ -508,7 +509,8 @@ class LiteRtRuntimeManager(
 
             // Sticky Session Tool Groups: reuse warm KV-cache when active tools already cover this turn
             // and avoid dragging heavy multi-group tool schemas onto plain zero-tool chat turns.
-            val warmToolsSatisfyTurn = activeSessionConversationId == sessionId &&
+            val samePhoneAccess = (ToolGroup.PHONE_USE.id in activeToolGroupsSignature) == (ToolGroup.PHONE_USE.id in enabledToolGroups)
+            val warmToolsSatisfyTurn = samePhoneAccess && activeSessionConversationId == sessionId &&
                 enabledToolGroups.all { it in activeToolGroupsSignature } &&
                 (enabledToolGroups.isNotEmpty() || activeToolGroupsSignature.size <= 1)
 
@@ -532,7 +534,7 @@ class LiteRtRuntimeManager(
             if (needsNewConversation) {
                 runCatching { existingConv?.close() }
                 // Cap sticky union to 2 groups so tool schemas stay compact and KV-cache RAM remains lean
-                val groupsToBind = if (activeSessionConversationId == sessionId && !forceConversationReset && !kvNearFull && enabledToolGroups.isNotEmpty()) {
+                val groupsToBind = if (samePhoneAccess && activeSessionConversationId == sessionId && !forceConversationReset && !kvNearFull && enabledToolGroups.isNotEmpty()) {
                     val union = activeToolGroupsSignature + enabledToolGroups
                     if (union.size <= 2) union else enabledToolGroups
                 } else {
@@ -801,7 +803,7 @@ class LiteRtRuntimeManager(
             val executedOutputs: List<Pair<String, String>> = if (recoveredToolCalls.isNotEmpty()) {
                 val ran = withContext(Dispatchers.IO) {
                     recoveredToolCalls.take(3).mapNotNull { call ->
-                        val output = toolkitRegistry.invokeToolByName(call.name, call.args)
+                        val output = toolkitRegistry.invokeToolByName(call.name, call.args, enabledToolGroups)
                         if (output != null) call.name to output else null
                     }
                 }

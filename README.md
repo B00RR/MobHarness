@@ -119,7 +119,7 @@ gradle :app:testDebugUnitTest
 - `ACCESS_COARSE_LOCATION`: usato solo se invochi il tool di posizione approssimativa.
 - `POST_NOTIFICATIONS`: usato per le notifiche delle automazioni pianificate in background.
 - `SET_ALARM`: usato dal tool `set_alarm` / `start_timer`.
-- **Servizio di Accessibilità (opzionale)**: da abilitare manualmente nelle Impostazioni Android solo se vuoi usare i tool **Phone-Use** (`read_screen`, `tap_element`, ecc.).
+- **Controllo del telefono (opzionale)**: attiva **Controllo Schermo & Pixel** in Studio, poi scegli **⋮ → Apri Accessibilità** nella chat e autorizza MobHarn nelle impostazioni Android. Puoi chiedere «Quali app ho aperte?» senza parole chiave: i Recenti mostrano attività recenti, non tutti i processi in esecuzione. Puoi revocare il servizio nelle impostazioni Android.
 
 ---
 
