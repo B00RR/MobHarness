@@ -372,164 +372,138 @@ class AndroidSystemActions(private val context: Context) {
         if (cleanQuery.isBlank()) return@withContext "Query di ricerca vuota."
 
         val encoded = URLEncoder.encode(cleanQuery, "UTF-8")
-        val sections = mutableListOf<String>()
         val wikiUa = "MobHarnAndroid/1.1 (https://mobharn.local; on-device assistant)"
+        val browserUa = "Mozilla/5.0 (Linux; Android 15; Pixel 10 Pro XL) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Mobile Safari/537.36"
 
-        // Helper: strip Italian/English question words & 2-letter province codes to isolate core entity for Wikipedia
-        // e.g. "popolazione Cardito NA" -> "Cardito", "quanti abitanti ha Cardito (NA)?" -> "Cardito"
-        fun extractCoreEntity(raw: String): String {
-            val noise = setOf(
-                "popolazione", "abitanti", "quanti", "quante", "quanto", "qual", "quale", "cosa",
-                "chi", "dove", "quando", "come", "perche", "perché", "storia", "superficie",
-                "sindaco", "capitale", "altezza", "meteo", "notizie", "ultime", "oggi", "attuale",
-                "attuali", "numero", "comune", "citta", "città", "provincia", "regione", "italia",
-                "population", "inhabitants", "what", "who", "where", "when", "how", "many",
-                "del", "della", "dello", "dei", "degli", "delle", "di", "da", "in", "su", "per",
-                "ha", "sono", "è", "e", "il", "lo", "la", "le", "gli", "un", "una", "suo", "sua"
-            )
-            val cleaned = raw
-                .replace(Regex("""\([A-Za-z]{2}\)"""), " ")
-                .replace(Regex("""[^\p{L}\p{N}\s'-]"""), " ")
-            val tokens = cleaned.split(Regex("\\s+")).filter { tok ->
-                val low = tok.lowercase()
-                tok.length >= 2 &&
-                    low !in noise &&
-                    !(tok.length == 2 && tok == tok.uppercase()) // strip province abbreviations like NA, MI, RM
-            }
-            return tokens.joinToString(" ").trim()
-        }
-
-        // 1. Wikipedia Search + Lead Extract (IT with EN fallback) — gives exact encyclopedic facts (e.g. population)
-        runCatching {
-            fun fetchWikiLeadExtract(lang: String, title: String): String? {
-                val encTitle = URLEncoder.encode(title, "UTF-8")
-                val url = "https://$lang.wikipedia.org/w/api.php?action=query&prop=extracts&exintro=1&explaintext=1&exchars=520&redirects=1&titles=$encTitle&format=json"
-                val req = Request.Builder().url(url).header("User-Agent", wikiUa).build()
-                return httpClient.newCall(req).execute().use { resp ->
-                    if (!resp.isSuccessful) return@use null
-                    val json = org.json.JSONObject(resp.body?.string().orEmpty())
-                    val pages = json.optJSONObject("query")?.optJSONObject("pages") ?: return@use null
-                    val firstKey = pages.keys().asSequence().firstOrNull() ?: return@use null
-                    if (firstKey == "-1") return@use null
-                    val page = pages.optJSONObject(firstKey) ?: return@use null
-                    val pageTitle = page.optString("title").trim()
-                    val extract = page.optString("extract").replace(Regex("\\s+"), " ").trim()
-                    if (extract.length >= 30) "$pageTitle: ${extract.take(480)}" else null
+        fun fetchWikiLeadExtract(lang: String, title: String): String? {
+            val encTitle = URLEncoder.encode(title, "UTF-8")
+            val url = "https://$lang.wikipedia.org/w/api.php?action=query&prop=extracts&exintro=1&explaintext=1&exchars=680&redirects=1&titles=$encTitle&format=json"
+            val req = Request.Builder().url(url).header("User-Agent", wikiUa).build()
+            return httpClient.newCall(req).execute().use { resp ->
+                if (resp.code != 200) return@use null
+                val json = org.json.JSONObject(resp.body?.string().orEmpty())
+                val pages = json.optJSONObject("query")?.optJSONObject("pages") ?: return@use null
+                val firstKey = pages.keys().asSequence().firstOrNull() ?: return@use null
+                if (firstKey == "-1") return@use null
+                val page = pages.optJSONObject(firstKey) ?: return@use null
+                val pageTitle = page.optString("title").trim()
+                val extract = page.optString("extract").replace(Regex("\\s+"), " ").trim()
+                if (extract.length < 30 || WebSearchParser.isWikipediaDisambiguation(pageTitle, extract)) {
+                    null
+                } else {
+                    "$pageTitle: ${extract.take(620)}"
                 }
             }
+        }
 
-            fun searchWikiBest(lang: String, q: String): List<String> {
-                if (q.isBlank()) return emptyList()
-                val encQ = URLEncoder.encode(q, "UTF-8")
-                val req = Request.Builder()
-                    .url("https://$lang.wikipedia.org/w/api.php?action=query&list=search&srsearch=$encQ&utf8=&format=json&srlimit=3")
-                    .header("User-Agent", wikiUa)
-                    .build()
-                return httpClient.newCall(req).execute().use { resp ->
-                    if (!resp.isSuccessful) return@use emptyList()
-                    val json = org.json.JSONObject(resp.body?.string().orEmpty())
-                    val arr = json.optJSONObject("query")?.optJSONArray("search") ?: return@use emptyList()
-                    val out = mutableListOf<String>()
-                    for (idx in 0 until arr.length()) {
-                        val o = arr.optJSONObject(idx) ?: continue
-                        val title = o.optString("title").trim()
-                        if (title.isBlank()) continue
-                        if (idx == 0) {
-                            val lead = runCatching { fetchWikiLeadExtract(lang, title) }.getOrNull()
-                            if (!lead.isNullOrBlank()) {
-                                out.add("- $lead")
-                                continue
+        fun searchWikiBest(lang: String, q: String): List<String> {
+            if (q.isBlank()) return emptyList()
+            val encQ = URLEncoder.encode(q, "UTF-8")
+            val req = Request.Builder()
+                .url("https://$lang.wikipedia.org/w/api.php?action=query&list=search&srsearch=$encQ&utf8=&format=json&srlimit=3")
+                .header("User-Agent", wikiUa)
+                .build()
+            return httpClient.newCall(req).execute().use { resp ->
+                if (resp.code != 200) return@use emptyList()
+                val json = org.json.JSONObject(resp.body?.string().orEmpty())
+                val arr = json.optJSONObject("query")?.optJSONArray("search") ?: return@use emptyList()
+                val out = mutableListOf<String>()
+                for (idx in 0 until arr.length()) {
+                    val o = arr.optJSONObject(idx) ?: continue
+                    val title = o.optString("title").trim()
+                    if (title.isBlank()) continue
+                    if (out.isEmpty()) {
+                        val lead = runCatching { fetchWikiLeadExtract(lang, title) }.getOrNull()
+                        if (!lead.isNullOrBlank()) {
+                            out.add("- $lead")
+                            continue
+                        }
+                    }
+                    val snippet = WebSearchParser.stripHtml(o.optString("snippet"))
+                    if (snippet.isNotBlank() && !WebSearchParser.isWikipediaDisambiguation(title, snippet)) {
+                        out.add("- $title: ${snippet.take(200)}")
+                    }
+                }
+                out
+            }
+        }
+
+        // Run Wikipedia and DuckDuckGo Web Search in parallel to halve tool latency
+        val (wikiSection, webSection) = kotlinx.coroutines.coroutineScope {
+            val wikiJob = kotlinx.coroutines.async {
+                runCatching {
+                    val coreEntity = WebSearchParser.extractCoreEntity(cleanQuery)
+                    val wikiHits = buildList {
+                        if (coreEntity.isNotBlank() && !coreEntity.equals(cleanQuery, ignoreCase = true)) {
+                            val directLead = runCatching { fetchWikiLeadExtract("it", coreEntity) }.getOrNull()
+                            if (!directLead.isNullOrBlank()) {
+                                add("- $directLead")
+                            } else {
+                                addAll(searchWikiBest("it", coreEntity).take(2))
                             }
                         }
-                        val snippet = stripHtml(o.optString("snippet"))
-                        if (snippet.isNotBlank()) {
-                            out.add("- $title: ${snippet.take(180)}")
+                        if (isEmpty()) addAll(searchWikiBest("it", cleanQuery).take(2))
+                        if (isEmpty() && coreEntity.isNotBlank()) addAll(searchWikiBest("en", coreEntity).take(2))
+                        if (isEmpty()) addAll(searchWikiBest("en", cleanQuery).take(2))
+                    }.distinct().take(2)
+                    if (wikiHits.isNotEmpty()) "### Enciclopedia (Wikipedia)\n" + wikiHits.joinToString("\n") else null
+                }.getOrNull()
+            }
+
+            val ddgJob = kotlinx.coroutines.async {
+                runCatching {
+                    val formBody = okhttp3.FormBody.Builder()
+                        .add("q", cleanQuery)
+                        .add("kl", "it-it")
+                        .build()
+                    val req = Request.Builder()
+                        .url("https://html.duckduckgo.com/html/")
+                        .post(formBody)
+                        .header("User-Agent", browserUa)
+                        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                        .header("Accept-Language", "it-IT,it;q=0.9,en;q=0.8")
+                        .header("Referer", "https://html.duckduckgo.com/")
+                        .build()
+
+                    // Require HTTP 200 (HTTP 202 is DuckDuckGo's anti-bot challenge page)
+                    val hits = httpClient.newCall(req).execute().use { resp ->
+                        if (resp.code != 200) emptyList()
+                        else WebSearchParser.parseDuckDuckGoHtml(resp.body?.string().orEmpty(), maxResults = 4)
+                    }.ifEmpty {
+                        val liteBody = okhttp3.FormBody.Builder().add("q", cleanQuery).build()
+                        val liteReq = Request.Builder()
+                            .url("https://lite.duckduckgo.com/lite/")
+                            .post(liteBody)
+                            .header("User-Agent", browserUa)
+                            .header("Accept", "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8")
+                            .header("Accept-Language", "it-IT,it;q=0.9,en;q=0.8")
+                            .header("Referer", "https://lite.duckduckgo.com/")
+                            .build()
+                        httpClient.newCall(liteReq).execute().use { resp ->
+                            if (resp.code != 200) emptyList()
+                            else WebSearchParser.parseDuckDuckGoLite(resp.body?.string().orEmpty(), maxResults = 4)
                         }
                     }
-                    out
-                }
+
+                    if (hits.isNotEmpty()) {
+                        val lines = hits.map { hit ->
+                            val domain = runCatching { Uri.parse(hit.url).host?.removePrefix("www.") }.getOrNull().orEmpty()
+                            val domainSuffix = if (domain.isNotBlank()) " ($domain)" else ""
+                            "- ${hit.title}$domainSuffix: ${hit.snippet}"
+                        }
+                        "### Risultati Web\n" + lines.joinToString("\n")
+                    } else null
+                }.getOrNull()
             }
 
-            val coreEntity = extractCoreEntity(cleanQuery)
-            val wikiHits = buildList {
-                // First try direct entity lookup if distinct from full query (e.g. "Cardito" for "popolazione Cardito NA")
-                if (coreEntity.isNotBlank() && !coreEntity.equals(cleanQuery, ignoreCase = true)) {
-                    val directLead = runCatching { fetchWikiLeadExtract("it", coreEntity) }.getOrNull()
-                    if (!directLead.isNullOrBlank()) {
-                        add("- $directLead")
-                    } else {
-                        addAll(searchWikiBest("it", coreEntity).take(2))
-                    }
-                }
-                if (isEmpty()) {
-                    addAll(searchWikiBest("it", cleanQuery).take(2))
-                }
-                if (isEmpty() && coreEntity.isNotBlank()) {
-                    addAll(searchWikiBest("en", coreEntity).take(2))
-                }
-                if (isEmpty()) {
-                    addAll(searchWikiBest("en", cleanQuery).take(2))
-                }
-            }.distinct().take(2)
-
-            if (wikiHits.isNotEmpty()) {
-                sections.add("### Enciclopedia (Wikipedia)\n" + wikiHits.joinToString("\n"))
-            }
+            wikiJob.await() to ddgJob.await()
         }
 
-        // 2. Real Web Search (DuckDuckGo HTML/Lite — ALWAYS attempted for general web coverage, not skipped on news)
-        runCatching {
-            val formBody = okhttp3.FormBody.Builder()
-                .add("q", cleanQuery)
-                .add("kl", "it-it")
-                .build()
-            val req = Request.Builder()
-                .url("https://html.duckduckgo.com/html/")
-                .post(formBody)
-                .header("User-Agent", "Mozilla/5.0 (Linux; Android 15; Pixel 10 Pro XL) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Mobile Safari/537.36")
-                .header("Accept-Language", "it-IT,it;q=0.9,en;q=0.8")
-                .build()
-            val webLines = httpClient.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) return@use emptyList()
-                val html = resp.body?.string().orEmpty()
-                val titleRegex = Regex("""class=['"][^'"]*result__a[^'"]*['"][^>]*>(.*?)</a>""", RegexOption.DOT_MATCHES_ALL)
-                val snippetRegex = Regex("""class=['"][^'"]*result__snippet[^'"]*['"][^>]*>(.*?)</(?:a|div|span)>""", RegexOption.DOT_MATCHES_ALL)
-                val titles = titleRegex.findAll(html).map { stripHtml(it.groupValues[1]) }.take(4).toList()
-                val snippets = snippetRegex.findAll(html).map { stripHtml(it.groupValues[1]) }.take(4).toList()
-                titles.mapIndexedNotNull { idx, t ->
-                    val s = snippets.getOrNull(idx).orEmpty()
-                    if (t.isBlank() && s.isBlank()) null
-                    else "- $t: ${s.take(190)}"
-                }
-            }.ifEmpty {
-                // Fallback to DuckDuckGo Lite
-                val liteBody = okhttp3.FormBody.Builder().add("q", cleanQuery).build()
-                val liteReq = Request.Builder()
-                    .url("https://lite.duckduckgo.com/lite/")
-                    .post(liteBody)
-                    .header("User-Agent", "Mozilla/5.0 (Linux; Android 15; Pixel 10 Pro XL) AppleWebKit/537.36 Chrome/134.0.0.0 Mobile Safari/537.36")
-                    .header("Accept-Language", "it-IT,it;q=0.9,en;q=0.8")
-                    .build()
-                httpClient.newCall(liteReq).execute().use { resp ->
-                    if (!resp.isSuccessful) return@use emptyList()
-                    val html = resp.body?.string().orEmpty()
-                    val linkRegex = Regex("""class=['"]result-link['"][^>]*>(.*?)</a>""", RegexOption.DOT_MATCHES_ALL)
-                    val snippetRegex = Regex("""class=['"]result-snippet['"][^>]*>(.*?)</td>""", RegexOption.DOT_MATCHES_ALL)
-                    val titles = linkRegex.findAll(html).map { stripHtml(it.groupValues[1]) }.take(4).toList()
-                    val snippets = snippetRegex.findAll(html).map { stripHtml(it.groupValues[1]) }.take(4).toList()
-                    titles.mapIndexedNotNull { idx, t ->
-                        val s = snippets.getOrNull(idx).orEmpty()
-                        if (t.isBlank() && s.isBlank()) null
-                        else "- $t: ${s.take(190)}"
-                    }
-                }
-            }
-            if (webLines.isNotEmpty()) {
-                sections.add("### Risultati Web\n" + webLines.joinToString("\n"))
-            }
-        }
+        val sections = mutableListOf<String>()
+        if (!wikiSection.isNullOrBlank()) sections.add(wikiSection)
+        if (!webSection.isNullOrBlank()) sections.add(webSection)
 
-        // 3. DuckDuckGo Instant Answer JSON API (fast direct answers/definitions if still light)
+        // 3. DuckDuckGo Instant Answer JSON API (fast direct answers/definitions if primary sources returned empty)
         if (sections.isEmpty()) {
             runCatching {
                 val req = Request.Builder()
@@ -537,13 +511,13 @@ class AndroidSystemActions(private val context: Context) {
                     .header("User-Agent", wikiUa)
                     .build()
                 httpClient.newCall(req).execute().use { resp ->
-                    if (resp.isSuccessful) {
+                    if (resp.code == 200) {
                         val json = org.json.JSONObject(resp.body?.string().orEmpty())
-                        val answer = json.optString("Answer").trim()
-                        val abstractText = json.optString("AbstractText").trim()
+                        val answer = WebSearchParser.decodeHtmlEntities(json.optString("Answer").trim())
+                        val abstractText = WebSearchParser.decodeHtmlEntities(json.optString("AbstractText").trim())
                         val lines = mutableListOf<String>()
                         if (answer.isNotBlank()) lines.add("- Risposta rapida: $answer")
-                        if (abstractText.isNotBlank()) lines.add("- ${abstractText.take(320)}")
+                        if (abstractText.isNotBlank()) lines.add("- ${abstractText.take(360)}")
                         if (lines.isNotEmpty()) {
                             sections.add("### Risposta Diretta\n" + lines.joinToString("\n"))
                         }
@@ -553,7 +527,7 @@ class AndroidSystemActions(private val context: Context) {
         }
 
         // 4. Google News RSS — ONLY when user asks for recent news OR as last-resort fallback;
-        // NEVER include 250-char base64 Google News redirect URLs that bloat token usage.
+        // never include 250-char Google News redirect URLs that waste model context.
         val lowerQ = cleanQuery.lowercase()
         val wantsNews = listOf("notizie", "news", "ultime", "oggi", "novità", "novita", "aggiornamenti", "meteo", "partita", "risultato")
             .any { lowerQ.contains(it) }
@@ -561,26 +535,12 @@ class AndroidSystemActions(private val context: Context) {
             runCatching {
                 val req = Request.Builder()
                     .url("https://news.google.com/rss/search?q=$encoded&hl=it&gl=IT&ceid=IT:it")
-                    .header("User-Agent", "Mozilla/5.0 (Linux; Android 15; Pixel 10 Pro XL) AppleWebKit/537.36")
+                    .header("User-Agent", browserUa)
                     .header("Accept-Language", "it-IT,it;q=0.9,en;q=0.8")
                     .build()
                 httpClient.newCall(req).execute().use { resp ->
-                    if (resp.isSuccessful) {
-                        val xml = resp.body?.string().orEmpty()
-                        val itemRegex = Regex("<item>(.*?)</item>", RegexOption.DOT_MATCHES_ALL)
-                        val titleRegex = Regex("<title>(.*?)</title>", RegexOption.DOT_MATCHES_ALL)
-                        val pubDateRegex = Regex("<pubDate>(.*?)</pubDate>", RegexOption.DOT_MATCHES_ALL)
-                        val newsLines = itemRegex.findAll(xml).take(3).mapNotNull { m ->
-                            val block = m.groupValues[1]
-                            val title = stripHtml(
-                                titleRegex.find(block)?.groupValues?.get(1).orEmpty()
-                                    .removePrefix("<![CDATA[").removeSuffix("]]>")
-                            )
-                            val date = stripHtml(pubDateRegex.find(block)?.groupValues?.get(1).orEmpty())
-                                .substringBeforeLast(" GMT").take(17)
-                            if (title.isBlank()) null
-                            else "- $title" + if (date.isNotBlank()) " [$date]" else ""
-                        }.toList()
+                    if (resp.code == 200) {
+                        val newsLines = WebSearchParser.parseGoogleNewsRss(resp.body?.string().orEmpty(), maxResults = 3)
                         if (newsLines.isNotEmpty()) {
                             sections.add("### Notizie Recenti\n" + newsLines.joinToString("\n"))
                         }
@@ -595,41 +555,58 @@ class AndroidSystemActions(private val context: Context) {
             buildString {
                 appendLine("Risultati per \"$cleanQuery\":")
                 append(sections.joinToString("\n\n"))
-            }.take(1350).trimEnd()
+            }.take(1450).trimEnd()
         }
     }
 
     suspend fun fetchWebpage(url: String, maxChars: Int = 3500): String = withContext(Dispatchers.IO) {
-        val clean = if (url.startsWith("http://") || url.startsWith("https://")) url.trim() else "https://${url.trim()}"
+        val rawUrl = url.trim().trim('<', '>', '"', '\'')
+        if (rawUrl.isBlank()) return@withContext "URL non valido o vuoto."
+        val clean = if (rawUrl.startsWith("http://", true) || rawUrl.startsWith("https://", true)) {
+            rawUrl
+        } else {
+            "https://$rawUrl"
+        }
         runCatching {
             val request = Request.Builder()
                 .url(clean)
-                .header("User-Agent", "Mozilla/5.0 (Linux; Android 15; Pixel) AppleWebKit/537.36")
+                .header("User-Agent", "Mozilla/5.0 (Linux; Android 15; Pixel 10 Pro XL) AppleWebKit/537.36 Chrome/134.0.0.0 Mobile Safari/537.36")
+                .header("Accept", "text/html,application/xhtml+xml,text/plain,application/json;q=0.9,*/*;q=0.5")
+                .header("Accept-Language", "it-IT,it;q=0.9,en;q=0.8")
                 .build()
             httpClient.newCall(request).execute().use { resp ->
                 if (!resp.isSuccessful) return@use "Errore HTTP ${resp.code} su $clean"
-                val raw = resp.body?.string().orEmpty()
-                val cleaned = stripHtml(raw)
-                "Contenuto estratto da $clean:\n${cleaned.take(maxChars)}"
+                val contentType = resp.header("Content-Type").orEmpty().lowercase()
+                val isReadableText = contentType.isBlank() ||
+                    contentType.startsWith("text/") ||
+                    contentType.contains("json") ||
+                    contentType.contains("xml") ||
+                    contentType.contains("xhtml")
+                if (!isReadableText) {
+                    return@use "Contenuto non testuale ($contentType) su $clean: impossibile estrarre testo."
+                }
+                // Cap download to 256 KB so multi-megabyte pages never spike device RAM
+                val bodyBytes = resp.body?.source()?.use { source ->
+                    source.request(262_144L)
+                    val buf = source.buffer
+                    val toRead = minOf(buf.size, 262_144L)
+                    buf.readByteArray(toRead)
+                } ?: ByteArray(0)
+                val raw = bodyBytes.toString(Charsets.UTF_8)
+                val cleaned = if (contentType.contains("json") || contentType.startsWith("text/plain")) {
+                    raw.take(maxChars).trim()
+                } else {
+                    WebSearchParser.extractMainWebpageText(raw, maxChars)
+                }
+                if (cleaned.isBlank()) {
+                    "Pagina scaricata ($clean), ma nessun testo leggibile estratto."
+                } else {
+                    "Contenuto estratto da $clean:\n$cleaned"
+                }
             }
         }.getOrElse { e ->
             "Impossibile scaricare $clean: ${e.message}"
         }
-    }
-
-    private fun stripHtml(html: String): String {
-        return html
-            .replace(Regex("<script[^>]*>.*?</script>", setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE)), " ")
-            .replace(Regex("<style[^>]*>.*?</style>", setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE)), " ")
-            .replace(Regex("<[^>]+>"), " ")
-            .replace("&nbsp;", " ")
-            .replace("&amp;", "&")
-            .replace("&quot;", "\"")
-            .replace("&#39;", "'")
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace(Regex("\\s+"), " ")
-            .trim()
     }
 
     private fun launchIntentSafely(intent: Intent, successMessage: String): String {

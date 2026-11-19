@@ -209,11 +209,16 @@ class CodeSandboxRunner(private val context: Context) {
 
     /**
      * Pure Kotlin safe recursive-descent mathematical expression evaluator.
+     * Supports Unicode operators (×, ÷, −, ², ³, √), Italian decimal commas, and trailing whitespace.
      */
     fun evaluateMath(expression: String): SandboxExecutionResult {
         val start = System.currentTimeMillis()
+        val normalized = normalizeMathExpression(expression)
+        if (normalized.isBlank()) {
+            return SandboxExecutionResult(false, "Espressione matematica vuota.", 0, "Kotlin Math Engine")
+        }
         return try {
-            val value = MathParser(expression).parse()
+            val value = MathParser(normalized).parse()
             val formatted = if (value % 1.0 == 0.0 && abs(value) < 1e15) {
                 value.toLong().toString()
             } else {
@@ -221,7 +226,7 @@ class CodeSandboxRunner(private val context: Context) {
             }
             SandboxExecutionResult(
                 success = true,
-                output = "$expression = $formatted",
+                output = "${expression.trim()} = $formatted",
                 durationMs = System.currentTimeMillis() - start,
                 engineLabel = "Kotlin Math Engine"
             )
@@ -233,6 +238,53 @@ class CodeSandboxRunner(private val context: Context) {
                 engineLabel = "Kotlin Math Engine"
             )
         }
+    }
+
+    private fun normalizeMathExpression(raw: String): String {
+        var s = raw.trim()
+            .replace('×', '*')
+            .replace('÷', '/')
+            .replace('−', '-')
+            .replace('–', '-')
+            .replace("²", "^2")
+            .replace("³", "^3")
+            .replace("√", "sqrt")
+
+        // Convert Italian decimal comma `12,5` -> `12.5` only when NOT separating function arguments (e.g. `pow(2, 3)`)
+        val out = StringBuilder(s.length)
+        var parenDepth = 0
+        val inMultiArgFunc = ArrayDeque<Boolean>()
+        var i = 0
+        while (i < s.length) {
+            val c = s[i]
+            when (c) {
+                '(' -> {
+                    val prefix = s.substring(0, i).trimEnd().lowercase()
+                    val isMulti = prefix.endsWith("pow") || prefix.endsWith("min") || prefix.endsWith("max")
+                    inMultiArgFunc.addLast(isMulti)
+                    parenDepth++
+                    out.append(c)
+                }
+                ')' -> {
+                    if (inMultiArgFunc.isNotEmpty()) inMultiArgFunc.removeLast()
+                    if (parenDepth > 0) parenDepth--
+                    out.append(c)
+                }
+                ',' -> {
+                    val prevDigit = i > 0 && s[i - 1].isDigit()
+                    val nextDigit = i + 1 < s.length && s[i + 1].isDigit()
+                    val insideMulti = inMultiArgFunc.lastOrNull() == true
+                    if (prevDigit && nextDigit && !insideMulti) {
+                        out.append('.')
+                    } else {
+                        out.append(',')
+                    }
+                }
+                else -> out.append(c)
+            }
+            i++
+        }
+        return out.toString().trim()
     }
 
     /**
@@ -287,8 +339,12 @@ class CodeSandboxRunner(private val context: Context) {
             ch = if (++pos < str.length) str[pos].code else -1
         }
 
+        private fun skipWhitespace() {
+            while (ch == ' '.code || ch == '\t'.code || ch == '\n'.code || ch == '\r'.code) nextChar()
+        }
+
         private fun eat(charToEat: Int): Boolean {
-            while (ch == ' '.code || ch == '\t'.code || ch == '\n'.code) nextChar()
+            skipWhitespace()
             if (ch == charToEat) {
                 nextChar()
                 return true
@@ -299,6 +355,7 @@ class CodeSandboxRunner(private val context: Context) {
         fun parse(): Double {
             nextChar()
             val x = parseExpression()
+            skipWhitespace()
             if (pos < str.length) throw IllegalArgumentException("Carattere inatteso: '${ch.toChar()}'")
             return x
         }

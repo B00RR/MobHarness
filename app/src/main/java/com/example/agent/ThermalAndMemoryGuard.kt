@@ -147,18 +147,18 @@ object ThermalAndMemoryGuard {
             )
             ThermalLevel.WARM -> ThermalPacingPolicy(
                 threadNicePriority = if (ecoModeEnabled) Process.THREAD_PRIORITY_LESS_FAVORABLE else Process.THREAD_PRIORITY_DEFAULT,
-                maxOutputTokens = if (ecoModeEnabled) 512 else 768,
+                maxOutputTokens = if (ecoModeEnabled) 768 else 1024,
                 interChunkDelayMs = if (ecoModeEnabled) 10L else 0L,
                 allowThinking = userRequestedThinking,
-                thinkingBudgetTokens = if (userRequestedThinking) (if (ecoModeEnabled) 256 else 384) else 0,
+                thinkingBudgetTokens = if (userRequestedThinking) (if (ecoModeEnabled) 384 else 512) else 0,
                 pauseForOverheat = false
             )
             ThermalLevel.COOL -> ThermalPacingPolicy(
                 threadNicePriority = if (ecoModeEnabled) Process.THREAD_PRIORITY_LESS_FAVORABLE else Process.THREAD_PRIORITY_DEFAULT,
-                maxOutputTokens = if (ecoModeEnabled) 640 else 1024,
+                maxOutputTokens = if (ecoModeEnabled) 1024 else 1536,
                 interChunkDelayMs = if (ecoModeEnabled) 4L else 0L,
                 allowThinking = userRequestedThinking,
-                thinkingBudgetTokens = if (userRequestedThinking) (if (ecoModeEnabled) 384 else 512) else 0,
+                thinkingBudgetTokens = if (userRequestedThinking) (if (ecoModeEnabled) 512 else 768) else 0,
                 pauseForOverheat = false
             )
             ThermalLevel.CRITICAL -> error("Handled above")

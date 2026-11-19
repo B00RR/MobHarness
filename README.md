@@ -1,8 +1,8 @@
-# MobHarn `v1.1.1`
+# MobHarn `v1.1.2`
 
 **MobHarn** è un'applicazione Android (Kotlin + Jetpack Compose) progettata come **agent harness AI completamente on-device**, alimentata da **LiteRT-LM** (Google AI Edge) e modelli locali `.litertlm` (come **Gemma 4**).
 
-> **Versione corrente:** `v1.1.1` (`versionCode 3`) — ricerca web fattuale potenziata (Wikipedia lead extracts + DuckDuckGo Web), guardia anti-loop sui tool, sintesi automatica della risposta finale e riduzione significativa dell'uso di RAM sulla KV-cache.
+> **Versione corrente:** `v1.1.2` (`versionCode 4`) — rimozione dei filtri n-gram che corrompevano date e fatti, zero `(risposta vuota)` con recupero automatico, routing zero-tool per la chat normale (2–3× più veloce e precisa) e fix completo del contrasto Dynamic Color su Android 16 / Pixel 10.
 
 L'app esegue inferenza locale con supporto **NPU (Google Tensor G5+ AOT), GPU e CPU**, **Chain of Thought (CoT) visibile in tempo reale**, **esecuzione reale di strumenti Android/Web/Coding**, apprendimento continuo (memoria + skill riutilizzabili), sandbox JavaScript/SQLite offline e protezioni avanzate per **RAM, temperatura, batteria e fluidità di sistema**.
 
@@ -124,6 +124,12 @@ gradle :app:testDebugUnitTest
 ---
 
 ## Cronologia Versioni (Changelog)
+
+### `v1.1.2` (`versionCode 4`)
+- **Stop corruzione di date, numeri e fatti**: rimossi `NoRepeatNgramConfig` e penalità di ripetizione artificiali su Gemma 4, che bloccavano la ripetizione di sequenze già presenti nel prompt di sistema (causando errori come date alterate o parole troncate).
+- **Zero `(risposta vuota)` e niente più CoT troncati a metà frase**: rimosso il tetto rigido `thinkingTokenBudget` durante il ragionamento attivo (lasciando a Gemma 4 il controllo nativo `enable_thinking`), aumentato il budget token in uscita e introdotto un **recupero automatico universale** che genera subito una risposta diretta pulita se il modello dovesse chiudere un turno senza testo visibile.
+- **Routing tool di precisione (chat normale a 0 tool)**: domande conversazionali e richieste su data/ora non iniettano più 11–15 schemi tool superflui nel prompt; il prompt di sistema resta snello e focalizzato, migliorando velocità (`tok/s`), uso RAM e accuratezza delle risposte di Gemma 4.
+- **Fix contrasto tema su Android 16 / Pixel 10**: aggiunta verifica automatica di luminanza sul `ColorScheme` dinamico (`Theme.kt`) e disabilitazione di `forceDarkAllowed` per impedire l'inversione dello sfondo (`background` bianco in Dark Mode / nero in Light Mode) e mantenere sempre leggibile ogni testo.
 
 ### `v1.1.1` (`versionCode 3`)
 - **Ricerca web fattuale precisa (`web_search`)**: priorità agli estratti introduttivi completi di **Wikipedia IT/EN** (con estrazione automatica dell'entità core es. *"popolazione Cardito NA"* → *"Cardito"*), ricerca web reale su **DuckDuckGo HTML/Lite** sempre attiva e rimozione dei link redirect chilometrici di Google News (che ora interviene solo per richieste di notizie o fallback).

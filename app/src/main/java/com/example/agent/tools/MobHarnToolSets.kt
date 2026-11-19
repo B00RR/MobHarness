@@ -82,11 +82,13 @@ class ToolExecutionMonitor(
     private val turnLock = Any()
     private val turnCallSignatures = mutableListOf<Pair<String, String>>()
     private val turnToolOutputs = mutableListOf<Pair<String, String>>()
+    private var turnAttemptCount: Int = 0
 
     fun beginTurn() {
         synchronized(turnLock) {
             turnCallSignatures.clear()
             turnToolOutputs.clear()
+            turnAttemptCount = 0
         }
     }
 
@@ -109,9 +111,9 @@ class ToolExecutionMonitor(
             when {
                 sameExact -> "Hai già eseguito $toolName con questi stessi parametri. NON richiamare altri tool: rispondi subito all'utente in italiano usando i dati già ottenuti."
                 sameToolCount >= 2 && toolName == "web_search" -> "Hai già effettuato 2 ricerche web in questo turno. NON fare altre ricerche: rispondi ora all'utente in italiano con le informazioni raccolte."
-                turnCallSignatures.size >= 5 -> "Limite di chiamate tool per turno raggiunto. Rispondi subito all'utente in italiano con i risultati già ottenuti."
+                turnCallSignatures.size >= 5 || turnAttemptCount >= 6 -> "Limite di chiamate tool per turno raggiunto. Rispondi subito all'utente in italiano con i risultati già ottenuti."
                 else -> {
-                    turnCallSignatures.add(normSig)
+                    turnAttemptCount++
                     null
                 }
             }
@@ -154,11 +156,14 @@ class ToolExecutionMonitor(
             onSuccess = { true to it },
             onFailure = { false to "Errore $toolName: ${it.message}" }
         )
-        // Keep tool outputs crisp so KV-cache RAM never spikes on small edge models
-        val result = rawResult.take(1600)
-        if (ok && result.isNotBlank()) {
+        // Keep tool outputs crisp and cut at clean line/word boundaries so KV-cache RAM stays bounded
+        val result = truncateToolOutput(rawResult, 1600)
+        if (ok) {
             synchronized(turnLock) {
-                turnToolOutputs.add(toolName to result)
+                turnCallSignatures.add(normSig)
+                if (result.isNotBlank()) {
+                    turnToolOutputs.add(toolName to result)
+                }
             }
         }
         val elapsed = System.currentTimeMillis() - start
@@ -168,13 +173,28 @@ class ToolExecutionMonitor(
                 toolName = toolName,
                 category = category,
                 argumentsSummary = argsSummary,
-                resultSummary = result.take(500),
+                resultSummary = truncateToolOutput(result, 500),
                 durationMs = elapsed,
                 status = if (ok) "success" else "error"
             )
         )
         repository.logToolExecution(activeSessionId, toolName, category, argsSummary, result, elapsed, ok)
         result
+    }
+
+    private fun truncateToolOutput(raw: String, maxChars: Int): String {
+        val text = raw.trim()
+        if (text.length <= maxChars) return text
+        val slice = text.take(maxChars)
+        val lastNewline = slice.lastIndexOf('\n')
+        if (lastNewline >= (maxChars * 0.65).toInt()) {
+            return slice.substring(0, lastNewline).trimEnd() + "\n..."
+        }
+        val lastSpace = slice.lastIndexOf(' ')
+        if (lastSpace >= (maxChars * 0.75).toInt()) {
+            return slice.substring(0, lastSpace).trimEnd() + "..."
+        }
+        return slice.trimEnd() + "..."
     }
 }
 
@@ -183,19 +203,48 @@ class MemoryAndSkillsToolSet(
     private val monitor: ToolExecutionMonitor
 ) : ToolSet {
 
+    private fun normalizeMemoryCategory(raw: String): String {
+        return when (raw.trim().uppercase().replace('-', '_').replace(' ', '_')) {
+            "USER_PROFILE", "PROFILE", "USER", "UTENTE", "PERSONAL" -> "USER_PROFILE"
+            "PREFERENCE", "PREFERENCES", "PREF", "PREFERENZA" -> "PREFERENCE"
+            "PROJECT", "PROJECTS", "PROGETTO" -> "PROJECT"
+            "CODING_CONVENTION", "CODING", "CODE", "STYLE" -> "CODING_CONVENTION"
+            else -> "FACT"
+        }
+    }
+
+    private fun normalizeSlugOrKey(raw: String, fallbackPrefix: String): String {
+        val cleaned = raw.trim()
+            .removePrefix("/")
+            .lowercase()
+            .replace(Regex("[^a-z0-9_]+"), "_")
+            .replace(Regex("_+"), "_")
+            .trim('_')
+        return cleaned.ifBlank { "${fallbackPrefix}_${System.currentTimeMillis() % 10000}" }
+    }
+
     @Tool(description = "Salva o aggiorna un fatto persistente in USER.md o MEMORY.md (categorie: USER_PROFILE, PREFERENCE, FACT, PROJECT, CODING_CONVENTION)")
     fun save_memory(
         @ToolParam(description = "Categoria: USER_PROFILE, PREFERENCE, FACT, PROJECT o CODING_CONVENTION") category: String,
         @ToolParam(description = "Chiave breve univoca in snake_case") keyName: String,
         @ToolParam(description = "Contenuto chiaro e conciso del ricordo") content: String,
         @ToolParam(description = "Importanza da 1 a 5") importance: Int = 3
-    ): String = monitor.executeTracked(
-        toolName = "save_memory",
-        category = ToolGroup.MEMORY.id,
-        argsSummary = "[$category] $keyName = ${content.take(80)}"
-    ) {
-        repository.upsertMemoryAndSync(category, keyName, content, importance)
-        "Memoria salvata e sincronizzata su Markdown: [$category] $keyName"
+    ): String {
+        val cleanCategory = normalizeMemoryCategory(category)
+        val cleanKey = normalizeSlugOrKey(keyName, "nota")
+        val cleanContent = content.trim()
+        val clampedImportance = importance.coerceIn(1, 5)
+        return monitor.executeTracked(
+            toolName = "save_memory",
+            category = ToolGroup.MEMORY.id,
+            argsSummary = "[$cleanCategory] $cleanKey = ${cleanContent.take(80)}"
+        ) {
+            if (cleanContent.isBlank()) {
+                return@executeTracked "Errore save_memory: specifica un contenuto non vuoto da salvare."
+            }
+            repository.upsertMemoryAndSync(cleanCategory, cleanKey, cleanContent, clampedImportance)
+            "Memoria salvata e sincronizzata su Markdown: [$cleanCategory] $cleanKey"
+        }
     }
 
     @Tool(description = "Cerca nei fatti persistenti di USER.md e MEMORY.md per parola chiave")
@@ -204,10 +253,14 @@ class MemoryAndSkillsToolSet(
     ): String = monitor.executeTracked(
         toolName = "search_memory",
         category = ToolGroup.MEMORY.id,
-        argsSummary = "query=\"$query\""
+        argsSummary = "query=\"${query.trim()}\""
     ) {
-        val results = repository.searchMemories(query)
-        if (results.isEmpty()) "Nessuna voce di memoria trovata per '$query'."
+        val cleanQuery = query.trim()
+        if (cleanQuery.isBlank()) {
+            return@executeTracked "Specifica una parola chiave non vuota per cercare nella memoria."
+        }
+        val results = repository.searchMemories(cleanQuery)
+        if (results.isEmpty()) "Nessuna voce di memoria trovata per '$cleanQuery'."
         else results.take(12).joinToString("\n") { "- [${it.category}] ${it.keyName}: ${it.content}" }
     }
 
@@ -217,10 +270,14 @@ class MemoryAndSkillsToolSet(
     ): String = monitor.executeTracked(
         toolName = "search_past_sessions",
         category = ToolGroup.MEMORY.id,
-        argsSummary = "fts=\"$query\""
+        argsSummary = "fts=\"${query.trim()}\""
     ) {
-        val hits = repository.searchSessionsHistory(query, limit = 8)
-        if (hits.isEmpty()) "Nessun messaggio passato trovato per '$query'."
+        val cleanQuery = query.trim()
+        if (cleanQuery.isBlank()) {
+            return@executeTracked "Specifica almeno una parola chiave per cercare nelle chat passate."
+        }
+        val hits = repository.searchSessionsHistory(cleanQuery, limit = 8)
+        if (hits.isEmpty()) "Nessun messaggio passato trovato per '$cleanQuery'."
         else hits.joinToString("\n") { m ->
             "[Sessione #${m.sessionId} • ${m.role}]: ${m.content.take(220)}"
         }
@@ -229,14 +286,21 @@ class MemoryAndSkillsToolSet(
     @Tool(description = "Carica le istruzioni complete di una Skill procedurale per nome/slug")
     fun load_skill(
         @ToolParam(description = "Slug della skill (es. coding_workflow, daily_briefing)") slug: String
-    ): String = monitor.executeTracked(
-        toolName = "load_skill",
-        category = ToolGroup.MEMORY.id,
-        argsSummary = "slug=$slug"
-    ) {
-        val skill = repository.loadSkill(slug)
-            ?: return@executeTracked "Skill '$slug' non trovata."
-        "# Skill: ${skill.title} (/${skill.slug})\n${skill.instructionsMd}"
+    ): String {
+        val rawNoSlash = slug.trim().removePrefix("/")
+        val cleanSlug = normalizeSlugOrKey(rawNoSlash, "")
+        return monitor.executeTracked(
+            toolName = "load_skill",
+            category = ToolGroup.MEMORY.id,
+            argsSummary = "slug=${cleanSlug.ifBlank { rawNoSlash }}"
+        ) {
+            if (rawNoSlash.isBlank()) {
+                return@executeTracked "Specifica lo slug della skill da caricare (usa list_skills per vedere quelle disponibili)."
+            }
+            val skill = repository.loadSkill(cleanSlug) ?: repository.loadSkill(rawNoSlash)
+                ?: return@executeTracked "Skill '$rawNoSlash' non trovata."
+            "# Skill: ${skill.title} (/${skill.slug})\n${skill.instructionsMd}"
+        }
     }
 
     @Tool(description = "Salva o aggiorna una Skill procedurale riutilizzabile nella libreria locale")
@@ -245,13 +309,22 @@ class MemoryAndSkillsToolSet(
         @ToolParam(description = "Titolo descrittivo") title: String,
         @ToolParam(description = "Breve descrizione di quando usarla") description: String,
         @ToolParam(description = "Istruzioni passo-passo in Markdown") instructionsMd: String
-    ): String = monitor.executeTracked(
-        toolName = "save_skill",
-        category = ToolGroup.MEMORY.id,
-        argsSummary = "slug=$slug, title=$title"
-    ) {
-        repository.upsertSkill(slug, title, description, instructionsMd)
-        "Skill '/$slug' salvata e sincronizzata nel vault."
+    ): String {
+        val cleanSlug = normalizeSlugOrKey(slug, "skill")
+        val cleanTitle = title.trim().ifBlank { cleanSlug }
+        val cleanDesc = description.trim().ifBlank { "Procedura salvata" }
+        val cleanInstructions = instructionsMd.trim()
+        return monitor.executeTracked(
+            toolName = "save_skill",
+            category = ToolGroup.MEMORY.id,
+            argsSummary = "slug=$cleanSlug, title=$cleanTitle"
+        ) {
+            if (cleanInstructions.isBlank()) {
+                return@executeTracked "Errore save_skill: le istruzioni Markdown della skill non possono essere vuote."
+            }
+            repository.upsertSkill(cleanSlug, cleanTitle, cleanDesc, cleanInstructions)
+            "Skill '/$cleanSlug' salvata e sincronizzata nel vault."
+        }
     }
 
     @Tool(description = "Elenca tutte le Skill procedurali salvate nella libreria locale")
@@ -271,11 +344,15 @@ class MemoryAndSkillsToolSet(
     ): String = monitor.executeTracked(
         toolName = "delete_memory",
         category = ToolGroup.MEMORY.id,
-        argsSummary = "delete \"$query\""
+        argsSummary = "delete \"${query.trim()}\""
     ) {
-        val hits = repository.searchMemories(query)
-        val exact = hits.firstOrNull { it.keyName.equals(query.trim(), ignoreCase = true) } ?: hits.firstOrNull()
-            ?: return@executeTracked "Nessun ricordo trovato per '$query'."
+        val cleanQuery = query.trim()
+        if (cleanQuery.isBlank()) {
+            return@executeTracked "Specifica la chiave o il testo del ricordo da rimuovere."
+        }
+        val hits = repository.searchMemories(cleanQuery)
+        val exact = hits.firstOrNull { it.keyName.equals(cleanQuery, ignoreCase = true) } ?: hits.firstOrNull()
+            ?: return@executeTracked "Nessun ricordo trovato per '$cleanQuery'."
         repository.deleteMemoryAndSync(exact.id)
         "Ricordo rimosso: [${exact.category}] ${exact.keyName}"
     }
@@ -685,107 +762,13 @@ class MobHarnToolkitRegistry(
     val phoneUseTools = PhoneUseToolSet(monitor)
 
     /**
-     * Selects a focused subset of enabled ToolGroups for the current prompt so edge models
-     * like Gemma 4 E2B/E4B stay fast and accurate while ALWAYS keeping Memory & Skills ready
-     * for continuous self-improvement.
+     * Precision-first tool router for edge models (Gemma 4 E2B/E4B).
+     * Pure conversational & date/time turns get ZERO tool schemas (2-3x faster, lower RAM, sharper answers).
+     * Domain tool groups and Memory/Skills tools are attached only when the prompt genuinely needs them.
      */
     fun selectRoutedToolGroups(userPrompt: String, enabledGroups: Set<String>): Set<String> {
-        val p = userPrompt.lowercase()
-        val domainSelected = linkedSetOf<String>()
-
-        fun addDomainIfEnabled(group: ToolGroup) {
-            if (group.id in enabledGroups) domainSelected.add(group.id)
-        }
-
-        // 1. Web Search / Live factual info / Math / URLs
-        if (p.containsAny(
-                "cerca", "ricerca", "internet", "web", "google", "online", "notizie", "news",
-                "meteo", "tempo fa", "oggi", "ultime", "prezzo", "quanto costa", "chi è", "chi ha",
-                "cos'è", "cosa è", "http://", "https://", "www.", "sito", "link", "pagina",
-                "calcola", "quanto fa", "radice", "percentuale", "json", "regex", "wikipedia",
-                "popolazione", "abitanti", "quanti", "quante", "quando", "dove si trova",
-                "capitale", "classifica", "risultato", "cambio", "valore", "meteo"
-            )
-        ) {
-            addDomainIfEnabled(ToolGroup.WEB_CALC)
-        }
-
-        // 2. Coding Workspace & Sandbox
-        if (p.containsAny(
-                "codice", "code", "file", "workspace", "progetto", "studio", "script", "javascript",
-                "js", "sql", "sqlite", "html", "css", "kotlin", "python", "patch", "bug", "errore",
-                "funzione", "sandbox", "esegui", "compila", "testa", "index.html", "app.js"
-            )
-        ) {
-            addDomainIfEnabled(ToolGroup.CODING)
-        }
-
-        // 3. Phone-Use (Accessibility UI control)
-        if (p.containsAny(
-                "schermo", "screen", "clicca", "tocca", "premi", "tap", "scorri", "scroll",
-                "digita", "scrivi nel campo", "leggi lo schermo", "cosa vedi", "accessibilit",
-                "indietro", "home", "notifiche", "screenshot"
-            )
-        ) {
-            addDomainIfEnabled(ToolGroup.PHONE_USE)
-        }
-
-        // 4. Android System Actions
-        if (p.containsAny(
-                "sveglia", "allarme", "timer", "calendario", "evento", "appuntamento", "mappa",
-                "maps", "indicazioni", "apri", "aprir", "avvia", "lancia", "app", "applicazion",
-                "youtube", "whatsapp", "spotify", "chrome", "instagram", "telegram", "fotocamera",
-                "camera", "galleria", "foto", "calcolatrice", "orologio", "gmail", "contatti",
-                "email", "mail", "sms", "messaggio", "chiama", "telefono", "condividi",
-                "impostazioni", "wifi", "bluetooth"
-            )
-        ) {
-            addDomainIfEnabled(ToolGroup.ANDROID_ACTIONS)
-        }
-
-        // 5. Device Telemetry & Sensors
-        if (p.containsAny(
-                "batteria", "ram", "memoria libera", "storage", "spazio", "temperatura", "cpu",
-                "rete", "telemetria", "appunti", "clipboard", "sensore", "sensori", "luce",
-                "barometro", "posizione", "dove sono", "gps", "pixel"
-            )
-        ) {
-            addDomainIfEnabled(ToolGroup.TELEMETRY)
-        }
-
-        // 6. Self-Evolving Harness & Custom Tools
-        if (p.containsAny(
-                "harness", "custom tool", "nuovo tool", "crea tool", "crea uno strumento",
-                "soul.md", "migliora te stesso", "auto-evolv", "ottimizza", "temperatura modello",
-                "parametri", "run_custom_tool"
-            )
-        ) {
-            addDomainIfEnabled(ToolGroup.SELF_EVOLVE)
-        }
-
-        // 7. Background Automations
-        if (p.containsAny("automazione", "pianifica", "ogni ora", "ogni giorno", "ricorrente", "cron", "background")) {
-            addDomainIfEnabled(ToolGroup.AUTOMATIONS)
-        }
-
-        // Default lean core when prompt is general or factual: Web/Calc + Telemetry
-        if (domainSelected.isEmpty()) {
-            addDomainIfEnabled(ToolGroup.WEB_CALC)
-            addDomainIfEnabled(ToolGroup.TELEMETRY)
-        }
-
-        // Keep up to 2 domain groups + ALWAYS attach Memory & Skills (if enabled) so the agent
-        // can save facts, search memories, load skills, and create new skills on every turn!
-        val finalGroups = linkedSetOf<String>()
-        finalGroups.addAll(domainSelected.take(2))
-        if (ToolGroup.MEMORY.id in enabledGroups) {
-            finalGroups.add(ToolGroup.MEMORY.id)
-        }
-        return finalGroups
+        return routeToolGroupsForPrompt(userPrompt, enabledGroups)
     }
-
-    private fun String.containsAny(vararg needles: String): Boolean =
-        needles.any { this.contains(it) }
 
     fun buildEnabledToolProviders(enabledGroups: Set<String>): List<ToolProvider> {
         val providers = mutableListOf<ToolProvider>()
@@ -805,27 +788,35 @@ class MobHarnToolkitRegistry(
      * LiteRT-LM's strict C++ ANTLR parser fails on a slightly malformed call (e.g. `"` instead of `<|"|>`).
      */
     fun invokeToolByName(rawName: String, args: Map<String, Any?>): String? {
-        val normalized = rawName.substringAfterLast(':').trim().lowercase()
+        val normalized = ToolCallRecoveryParser.normalizeToolName(rawName)
+        if (normalized.isBlank()) return null
+
+        fun lookup(key: String): Any? {
+            val raw = args[key] ?: args.entries.firstOrNull { it.key.equals(key, ignoreCase = true) }?.value
+            return if (raw == null || raw == JSONObject.NULL) null else raw
+        }
 
         fun str(vararg keys: String, default: String = ""): String {
             for (k in keys) {
-                val direct = args[k] ?: args.entries.firstOrNull { it.key.equals(k, ignoreCase = true) }?.value
+                val direct = lookup(k)
                 if (direct != null) {
                     val s = direct.toString().trim()
-                    if (s.isNotEmpty()) return s
+                    if (s.isNotEmpty() && !s.equals("null", ignoreCase = true)) return s
                 }
             }
             if (args.size == 1 && keys.isNotEmpty()) {
-                val single = args.values.firstOrNull()?.toString()?.trim()
-                if (!single.isNullOrEmpty()) return single
+                val rawSingle = args.values.firstOrNull()
+                if (rawSingle != null && rawSingle != JSONObject.NULL) {
+                    val single = rawSingle.toString().trim()
+                    if (single.isNotEmpty() && !single.equals("null", ignoreCase = true)) return single
+                }
             }
             return default
         }
 
         fun intArg(vararg keys: String, default: Int): Int {
             for (k in keys) {
-                val raw = args[k] ?: args.entries.firstOrNull { it.key.equals(k, ignoreCase = true) }?.value
-                when (raw) {
+                when (val raw = lookup(k)) {
                     is Number -> return raw.toInt()
                     is String -> raw.trim().toIntOrNull()?.let { return it }
                 }
@@ -835,10 +826,9 @@ class MobHarnToolkitRegistry(
 
         fun doubleArg(vararg keys: String, default: Double): Double {
             for (k in keys) {
-                val raw = args[k] ?: args.entries.firstOrNull { it.key.equals(k, ignoreCase = true) }?.value
-                when (raw) {
+                when (val raw = lookup(k)) {
                     is Number -> return raw.toDouble()
-                    is String -> raw.trim().toDoubleOrNull()?.let { return it }
+                    is String -> raw.trim().replace(',', '.').toDoubleOrNull()?.let { return it }
                 }
             }
             return default
@@ -846,11 +836,10 @@ class MobHarnToolkitRegistry(
 
         fun boolArg(vararg keys: String, default: Boolean): Boolean {
             for (k in keys) {
-                val raw = args[k] ?: args.entries.firstOrNull { it.key.equals(k, ignoreCase = true) }?.value
-                when (raw) {
+                when (val raw = lookup(k)) {
                     is Boolean -> return raw
                     is String -> when (raw.trim().lowercase()) {
-                        "true", "1", "yes", "si" -> return true
+                        "true", "1", "yes", "si", "sì" -> return true
                         "false", "0", "no" -> return false
                     }
                 }
@@ -860,12 +849,21 @@ class MobHarnToolkitRegistry(
 
         return when (normalized) {
             // Web & Calc
-            "web_search", "search_web", "google_search" ->
-                webCalcTools.web_search(str("query", "q", "search_query", "text"))
-            "fetch_webpage", "fetch_url", "read_webpage" ->
-                webCalcTools.fetch_webpage(str("url", "link", "href"))
-            "calculate_expression", "calculate", "calc" ->
-                webCalcTools.calculate_expression(str("expression", "expr", "formula"))
+            "web_search", "search_web", "google_search", "search", "internet_search", "wiki_search", "wikipedia" -> {
+                val q = str("query", "q", "search_query", "text", "topic")
+                if (q.isBlank()) "Errore web_search: parametro 'query' mancante o vuoto."
+                else webCalcTools.web_search(q)
+            }
+            "fetch_webpage", "fetch_url", "read_webpage", "browse_url", "get_webpage" -> {
+                val url = str("url", "link", "href")
+                if (url.isBlank()) "Errore fetch_webpage: parametro 'url' mancante o vuoto."
+                else webCalcTools.fetch_webpage(url)
+            }
+            "calculate_expression", "calculate", "calc", "calculator", "math", "eval_math" -> {
+                val expr = str("expression", "expr", "formula", "input")
+                if (expr.isBlank()) "Errore calculate_expression: parametro 'expression' mancante o vuoto."
+                else webCalcTools.calculate_expression(expr)
+            }
             "validate_json_regex", "validate_json_or_regex" ->
                 webCalcTools.validate_json_regex(
                     mode = str("mode", default = "json"),
@@ -874,14 +872,17 @@ class MobHarnToolkitRegistry(
                 )
 
             // Memory & Skills
-            "save_memory", "remember_fact", "remember", "memorize" ->
-                memoryTools.save_memory(
+            "save_memory", "remember_fact", "remember", "remember_this", "memorize", "add_memory" -> {
+                val content = str("content", "value", "fact", "text")
+                if (content.isBlank()) "Errore save_memory: parametro 'content' mancante o vuoto."
+                else memoryTools.save_memory(
                     category = str("category", "cat", default = "FACT"),
                     keyName = str("keyName", "key_name", "key", default = "nota_${System.currentTimeMillis() % 10000}"),
-                    content = str("content", "value", "fact", "text"),
+                    content = content,
                     importance = intArg("importance", "priority", default = 3)
                 )
-            "search_memory", "recall_memory", "get_memory" ->
+            }
+            "search_memory", "recall_memory", "get_memory", "get_memories", "find_memory" ->
                 memoryTools.search_memory(str("query", "q", "keyword", "key"))
             "delete_memory", "forget_memory" ->
                 memoryTools.delete_memory(str("query", "keyName", "key", "q"))
@@ -889,8 +890,11 @@ class MobHarnToolkitRegistry(
                 memoryTools.search_past_sessions(str("query", "q", "keyword"))
             "list_skills" ->
                 memoryTools.list_skills()
-            "load_skill", "use_skill", "get_skill" ->
-                memoryTools.load_skill(str("slug", "name", "skill"))
+            "load_skill", "use_skill", "get_skill" -> {
+                val slug = str("slug", "name", "skill")
+                if (slug.isBlank()) "Errore load_skill: parametro 'slug' mancante."
+                else memoryTools.load_skill(slug)
+            }
             "save_skill", "create_skill", "learn_skill" ->
                 memoryTools.save_skill(
                     slug = str("slug", "name", default = "skill_${System.currentTimeMillis() % 10000}"),
@@ -900,12 +904,21 @@ class MobHarnToolkitRegistry(
                 )
 
             // Android System Actions
-            "launch_app", "open_app", "start_app" ->
-                androidTools.launch_app(str("appName", "app_name", "app", "name", "package"))
-            "open_url", "open_link" ->
-                androidTools.open_url(str("url", "link"))
-            "open_maps", "maps" ->
-                androidTools.open_maps(str("query", "location", "place", "address"))
+            "launch_app", "open_app", "start_app" -> {
+                val app = str("appName", "app_name", "app", "name", "package")
+                if (app.isBlank()) "Errore launch_app: specifica il nome dell'app da aprire."
+                else androidTools.launch_app(app)
+            }
+            "open_url", "open_link", "open_browser" -> {
+                val url = str("url", "link")
+                if (url.isBlank()) "Errore open_url: specifica l'URL da aprire."
+                else androidTools.open_url(url)
+            }
+            "open_maps", "maps" -> {
+                val query = str("query", "location", "place", "address")
+                if (query.isBlank()) "Errore open_maps: specifica un luogo o indirizzo."
+                else androidTools.open_maps(query)
+            }
             "set_alarm" ->
                 androidTools.set_alarm(
                     hour = intArg("hour", "hours", "h", default = 8),
@@ -945,7 +958,7 @@ class MobHarnToolkitRegistry(
             // Coding Workspace & Sandbox
             "list_workspace_files", "list_files" ->
                 codingTools.list_workspace_files()
-            "read_file_lines", "read_file" ->
+            "read_file_lines", "read_file", "read_workspace_file" ->
                 codingTools.read_file_lines(
                     relativePath = str("relativePath", "relative_path", "path", "file"),
                     startLine = intArg("startLine", "start_line", default = 1),
@@ -965,13 +978,13 @@ class MobHarnToolkitRegistry(
                 )
             "search_code", "grep_workspace" ->
                 codingTools.search_code(str("pattern", "query", "q"))
-            "run_js_sandbox", "run_javascript", "run_js" ->
+            "run_js_sandbox", "run_javascript", "run_js", "execute_js" ->
                 codingTools.run_js_sandbox(str("code", "script", "js"))
-            "run_sql_sandbox", "run_sql" ->
+            "run_sql_sandbox", "run_sql", "execute_sql" ->
                 codingTools.run_sql_sandbox(str("sqlScript", "sql_script", "sql", "query"))
 
             // Telemetry
-            "get_device_telemetry", "device_telemetry", "telemetry" ->
+            "get_device_telemetry", "device_telemetry", "telemetry", "get_telemetry", "battery_status" ->
                 telemetryTools.get_device_telemetry()
             "read_clipboard", "get_clipboard" ->
                 telemetryTools.read_clipboard()
@@ -1082,4 +1095,117 @@ fun decodeToolTracesFromJson(json: String): List<ToolCallTrace> {
             )
         }
     }.getOrDefault(emptyList())
+}
+
+/**
+ * Pure, unit-testable precision tool router for edge models (Gemma 4 E2B/E4B).
+ * Keeps plain chat & local date/time turns completely tool-free (fast, low RAM, zero schema confusion),
+ * and binds only the exact tool groups (max 2) genuinely needed for the user's prompt.
+ */
+fun routeToolGroupsForPrompt(userPrompt: String, enabledGroups: Set<String>): Set<String> {
+    val p = userPrompt.lowercase().trim()
+    if (p.isBlank()) return emptySet()
+
+    fun String.containsAny(vararg needles: String): Boolean = needles.any { this.contains(it) }
+
+    val selected = linkedSetOf<String>()
+    fun addIfEnabled(group: ToolGroup) {
+        if (group.id in enabledGroups) selected.add(group.id)
+    }
+
+    // Pure date/time questions are already answered by the live timestamp in the system prompt
+    val isPureDateTimeQuestion = p.containsAny(
+        "che giorno è", "che giorno e'", "che giorno e ", "che data è", "che data e'",
+        "data di oggi", "giorno della settimana", "che ore sono", "che ora è", "che ora e'",
+        "che anno è", "che mese è", "oggi che giorno"
+    ) && !p.containsAny("cerca", "internet", "web", "notizie", "meteo", "sveglia", "timer", "calendario", "evento")
+
+    // 1. Web Search / Live factual lookup / Math / URLs
+    if (!isPureDateTimeQuestion && p.containsAny(
+            "cerca", "ricerca", "internet", "web", "google", "online", "notizie", "news",
+            "meteo", "previsioni", "ultime notizie", "notizie di oggi", "meteo oggi",
+            "prezzo", "quanto costa", "http://", "https://", "www.", "sito", "link", "pagina",
+            "calcola", "quanto fa", "radice", "percentuale", "json", "regex", "wikipedia",
+            "popolazione", "abitanti", "quanti abitanti", "dove si trova", "capitale",
+            "classifica", "risultato", "cambio", "valuta", "bitcoin", "borsa", "chi ha vinto",
+            "chi è il", "chi e' il", "chi è la", "chi e' la"
+        )
+    ) {
+        addIfEnabled(ToolGroup.WEB_CALC)
+    }
+
+    // 2. Coding Workspace & Sandbox
+    if (p.containsAny(
+            "codice", "code", "file", "workspace", "progetto", "studio", "script", "javascript",
+            "js", "sql", "sqlite", "html", "css", "kotlin", "python", "patch", "bug",
+            "funzione", "sandbox", "esegui", "compila", "testa", "index.html", "app.js"
+        )
+    ) {
+        addIfEnabled(ToolGroup.CODING)
+    }
+
+    // 3. Phone-Use (Accessibility UI control)
+    if (p.containsAny(
+            "schermo", "screen", "clicca", "tocca", "premi", "tap", "scorri", "scroll",
+            "digita", "scrivi nel campo", "leggi lo schermo", "cosa vedi", "accessibilit",
+            "screenshot"
+        )
+    ) {
+        addIfEnabled(ToolGroup.PHONE_USE)
+    }
+
+    // 4. Android System Actions
+    if (p.containsAny(
+            "sveglia", "allarme", "timer", "calendario", "evento", "appuntamento", "mappa",
+            "maps", "indicazioni", "apri ", "aprimi", "avvia ", "lancia ", "applicazione",
+            "youtube", "whatsapp", "spotify", "chrome", "instagram", "telegram", "fotocamera",
+            "camera", "galleria", "calcolatrice", "orologio", "gmail", "contatti",
+            "email", "mail", "sms", "chiama ", "condividi", "impostazioni", "wifi", "bluetooth"
+        )
+    ) {
+        addIfEnabled(ToolGroup.ANDROID_ACTIONS)
+    }
+
+    // 5. Device Telemetry & Sensors
+    if (p.containsAny(
+            "batteria", "ram", "memoria libera", "storage", "spazio", "temperatura", "cpu",
+            "telemetria", "appunti", "clipboard", "sensore", "sensori", "barometro",
+            "posizione", "dove sono", "gps"
+        )
+    ) {
+        addIfEnabled(ToolGroup.TELEMETRY)
+    }
+
+    // 6. Self-Evolving Harness & Custom Tools
+    if (p.containsAny(
+            "harness", "custom tool", "nuovo tool", "crea tool", "crea uno strumento",
+            "soul.md", "migliora te stesso", "auto-evolv", "temperatura modello",
+            "run_custom_tool"
+        )
+    ) {
+        addIfEnabled(ToolGroup.SELF_EVOLVE)
+    }
+
+    // 7. Background Automations
+    if (p.containsAny("automazione", "pianifica", "ogni ora", "ogni giorno", "ricorrente", "cron")) {
+        addIfEnabled(ToolGroup.AUTOMATIONS)
+    }
+
+    // 8. Memory & Skills (attached only when user asks to remember/forget/search memory,
+    // shares personal profile/preferences, or explicitly uses/creates skills)
+    val hasSlashSkillToken = Regex("""(?:^|\s)/[a-z][a-z0-9_-]{1,}""").containsMatchIn(p)
+    if (hasSlashSkillToken || p.containsAny(
+            "ricord", "segna", "annota", "tieni a mente", "memoriz", "dimentic", "cancella ricordo",
+            "skill", "impara", "procedura", "mi chiamo", "abito ", "vivo a", "vivo in",
+            "lavoro come", "faccio il", "faccio la", "preferisc", "mi piace",
+            "cosa sai di me", "cosa ricordi", "abbiamo parlato", "sessione", "storico",
+            "profilo", "vault", "user.md", "memory.md", "ogni volta", "da ora in poi",
+            "rispondi sempre"
+        )
+    ) {
+        addIfEnabled(ToolGroup.MEMORY)
+    }
+
+    // Cap to at most 2 groups so Gemma 4 E2B/E4B context remains fast, lean, and accurate
+    return selected.take(2).toCollection(linkedSetOf())
 }

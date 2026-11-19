@@ -81,20 +81,30 @@ class SystemPromptAssembler(private val repository: MobHarnRepository) {
             }
         }
 
+        val hasTools = routedGroups.isNotEmpty()
+        val hasMemoryTools = "memory" in routedGroups
+
         return buildString {
             appendLine(vault.soulMd.trim().take(soulBudget))
             appendLine()
-            appendLine("## REGOLE CRITICHE SUI TOOL")
-            appendLine("- Data/ora: $now")
-            appendLine("- Il modello gira in locale, ma HAI ACCESSO REALE A INTERNET e agli strumenti Android tramite le funzioni registrate.")
-            appendLine("- ESECUZIONE IMMEDIATA: NON rispondere mai solo 'Sì, posso farlo'. Quando l'utente chiede un'azione (ricerca web, aprire un'app con `launch_app`, sveglia/timer, telemetria, codice), INVOCA SUBITO il tool corrispondente.")
-            appendLine("- Non inventare risultati e non scrivere chiamate di funzione come semplice testo nella risposta: usa il meccanismo di chiamata tool e rispondi in italiano con i dati reali.")
-            appendLine()
-            appendLine("## APPRENDIMENTO CONTINUO (MEMORIA & SKILL)")
-            appendLine("- SEGNARE E RICORDARE: appena l'utente condivide fatti personali (nome, città, lavoro, gusti, dispositivi, progetti), preferenze di stile, oppure dice 'ricordati', 'segna', 'annota', 'tieni a mente', chiama SUBITO `save_memory` (categorie: USER_PROFILE, PREFERENCE, FACT, PROJECT, CODING_CONVENTION) con una chiave `snake_case` chiara.")
-            appendLine("- RECUPERO MEMORIA: se l'utente fa riferimento a cose dette in passato o chiede cosa ricordi di lui, usa `search_memory` o `search_past_sessions` prima di rispondere.")
-            appendLine("- USARE LE SKILL: controlla sempre l'elenco SKILL qui sotto; se una skill è pertinente alla richiesta, carica le sue istruzioni con `load_skill` e seguile.")
-            appendLine("- CREARE E MIGLIORARE SKILL: quando impari un nuovo flusso riutilizzabile, risolvi un'attività in più passaggi o l'utente ti insegna come svolgere un compito ricorrente ('impara a...', 'ogni volta che...', 'crea una skill'), salva o aggiorna la procedura con `save_skill` così da migliorare con l'uso.")
+            appendLine("Data e ora attuali: $now.")
+            appendLine("Rispondi sempre in italiano in modo diretto, accurato e conciso.")
+
+            if (hasTools) {
+                appendLine()
+                appendLine("## STRUMENTI ATTIVI")
+                appendLine("- Hai accesso reale agli strumenti registrati in questo turno (incluso Internet se `web_search` è attivo).")
+                appendLine("- Quando la richiesta richiede un dato esterno o un'azione, invoca subito lo strumento appropriato senza fingere di averlo fatto e poi rispondi in italiano usando i risultati reali.")
+                appendLine("- Non scrivere mai chiamate di funzione come semplice testo nella risposta.")
+            }
+
+            if (hasMemoryTools) {
+                appendLine()
+                appendLine("## MEMORIA & SKILL")
+                appendLine("- Se l'utente condivide fatti personali o chiede di segnare/ricordare qualcosa, salva subito con `save_memory` (USER_PROFILE, PREFERENCE, FACT, PROJECT, CODING_CONVENTION).")
+                appendLine("- Per recuperare ricordi o vecchie chat usa `search_memory` o `search_past_sessions`.")
+                appendLine("- Per procedure apprese usa `load_skill` oppure crea/aggiorna una procedura riutilizzabile con `save_skill`.")
+            }
 
             if (vault.userMd.isNotBlank()) {
                 appendLine()
@@ -114,9 +124,9 @@ class SystemPromptAssembler(private val repository: MobHarnRepository) {
                 appendLine(vault.memoryMd.trim().take(if (isLongCtx) 1400 else 800))
             }
 
-            // Rank skills dynamically so large skill libraries always surface the best matches
+            // Show skills catalog when memory/skills tools are active or prompt mentions a skill
             val skills = repository.getEnabledSkills()
-            if (skills.isNotEmpty()) {
+            if (skills.isNotEmpty() && (hasMemoryTools || userPrompt.contains("/"))) {
                 val topSkills = ContextAndMemoryEngine.rankSkillsForPrompt(userPrompt, skills, limit = maxSkills)
                 appendLine()
                 appendLine("## SKILL APPRESE (usa load_skill o aggiorna con save_skill)")
@@ -126,14 +136,14 @@ class SystemPromptAssembler(private val repository: MobHarnRepository) {
                 }
             }
 
-            if (routedGroups.isEmpty() || "coding" in routedGroups) {
+            if ("coding" in routedGroups) {
                 val projectMap = repository.workspace.buildCompactProjectMap(activeProject)
                 appendLine()
                 appendLine("## WORKSPACE ($activeProject)")
                 appendLine(projectMap.take(workspaceBudget))
             }
 
-            if (routedGroups.isEmpty() || "self_evolve" in routedGroups) {
+            if ("self_evolve" in routedGroups) {
                 val customTools = repository.getEnabledCustomTools()
                 if (customTools.isNotEmpty()) {
                     appendLine()

@@ -15,8 +15,6 @@ import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
 import com.google.ai.edge.litertlm.Message
-import com.google.ai.edge.litertlm.NoRepeatNgramConfig
-import com.google.ai.edge.litertlm.RepetitionPenaltyConfig
 import com.google.ai.edge.litertlm.SamplerConfig
 import com.google.ai.edge.litertlm.ThinkingConfig
 import kotlinx.coroutines.CoroutineScope
@@ -509,9 +507,10 @@ class LiteRtRuntimeManager(
             val kvNearFull = currentTokens >= (tokenLimit * 0.70f).toInt()
 
             // Sticky Session Tool Groups: reuse warm KV-cache when active tools already cover this turn
+            // and avoid dragging heavy multi-group tool schemas onto plain zero-tool chat turns.
             val warmToolsSatisfyTurn = activeSessionConversationId == sessionId &&
-                activeToolGroupsSignature.isNotEmpty() &&
-                enabledToolGroups.all { it in activeToolGroupsSignature }
+                enabledToolGroups.all { it in activeToolGroupsSignature } &&
+                (enabledToolGroups.isNotEmpty() || activeToolGroupsSignature.size <= 1)
 
             val needsNewConversation = existingConv == null ||
                 forceConversationReset ||
@@ -520,10 +519,20 @@ class LiteRtRuntimeManager(
                 activeSessionConversationId != sessionId ||
                 !warmToolsSatisfyTurn
 
+            val useToolsOnPrimary = enabledToolGroups.isNotEmpty()
+            // When thinking is enabled, rely on Gemma 4's native `enable_thinking` channel control
+            // (thinkingConfig = null) instead of a tight thinkingTokenBudget that can slice CoT mid-sentence
+            // without closing `<channel|>`. When thinking is disabled, suppress it explicitly.
+            val effectiveThinkingConfig = if (policy.allowThinking) {
+                null
+            } else {
+                ThinkingConfig(enableThinking = false, thinkingTokenBudget = 0)
+            }
+
             if (needsNewConversation) {
                 runCatching { existingConv?.close() }
                 // Cap sticky union to 2 groups so tool schemas stay compact and KV-cache RAM remains lean
-                val groupsToBind = if (activeSessionConversationId == sessionId && !forceConversationReset && !kvNearFull) {
+                val groupsToBind = if (activeSessionConversationId == sessionId && !forceConversationReset && !kvNearFull && enabledToolGroups.isNotEmpty()) {
                     val union = activeToolGroupsSignature + enabledToolGroups
                     if (union.size <= 2) union else enabledToolGroups
                 } else {
@@ -551,6 +560,11 @@ class LiteRtRuntimeManager(
                     seedMessages.removeAt(seedMessages.lastIndex)
                 }
                 val finalSeedMessages = seedMessages.takeLast(maxSeedMessages.coerceIn(2, 10))
+                val effectiveTemp = if (groupsToBind.isNotEmpty()) {
+                    profile.temperature.toDouble().coerceAtMost(0.65)
+                } else {
+                    profile.temperature.toDouble()
+                }
                 val convConfig = ConversationConfig(
                     systemInstruction = Contents.of(systemInstruction),
                     initialMessages = finalSeedMessages,
@@ -558,14 +572,11 @@ class LiteRtRuntimeManager(
                     samplerConfig = SamplerConfig(
                         topK = profile.topK,
                         topP = profile.topP.toDouble(),
-                        temperature = profile.temperature.toDouble()
+                        temperature = effectiveTemp
                     ),
-                    automaticToolCalling = true,
+                    automaticToolCalling = tools.isNotEmpty(),
                     extraContext = mapOf("enable_thinking" to policy.allowThinking),
-                    thinkingConfig = ThinkingConfig(
-                        enableThinking = policy.allowThinking,
-                        thinkingTokenBudget = policy.thinkingBudgetTokens
-                    )
+                    thinkingConfig = effectiveThinkingConfig
                 )
                 activeConversation = currentEngine.createConversation(convConfig)
                 activeSessionConversationId = sessionId
@@ -578,46 +589,20 @@ class LiteRtRuntimeManager(
             var firstTokenMs = 0L
             var tokenCounter = 0
             var totalVisibleChars = 0
+            val capturedThought = StringBuilder()
             var lastSampledKvTokens = runCatching { conversation.getTokenCount() }.getOrDefault(0)
 
             val parser = ThinkingStreamParser()
-            // CRITICAL: Never apply repetition/presence/frequency penalties when tools are enabled!
-            // Gemma 4's tool schema repeats `<|"|>` dozens of times; penalizing it forces the model
-            // to emit ASCII `"` instead of `<|"|>`, crashing LiteRT-LM's strict ANTLR FC parser.
-            // Meanwhile noRepeatNgramSize = 5 prevents `web_search_search_search` and CoT phrase loops
-            // without affecting single-token `<|"|>` delimiters.
-            val useToolsOnPrimary = enabledToolGroups.isNotEmpty()
-            val primaryRepetitionConfig = if (useToolsOnPrimary) {
-                null
-            } else {
-                RepetitionPenaltyConfig(
-                    repetitionPenalty = 1.06f,
-                    presencePenalty = 0.10f,
-                    frequencyPenalty = 0.05f,
-                    windowSize = 96
-                )
-            }
-            val primaryNoRepeatConfig = NoRepeatNgramConfig(
-                noRepeatNgramSize = 5,
-                windowSize = 96
-            )
-            // On tool turns, reserve generous output budget & keep CoT concise so the model never runs
-            // out of tokens inside `<thought>` before writing its visible Italian answer.
-            val effectiveMaxOutputTokens = if (useToolsOnPrimary) {
+            // CRITICAL: Never apply NoRepeatNgramConfig or RepetitionPenaltyConfig on Gemma 4!
+            // Hard n-gram banning masks exact dates/numbers/names from the system prompt or tool output
+            // (e.g. corrupting "19 novembre 2026" into "17 novembre 2026" or "Cardito" into "Carditoito"),
+            // and repetition penalties break Gemma 4's repeated `<|"|>` tool delimiters.
+            val effectiveMaxOutputTokens = if (useToolsOnPrimary || policy.allowThinking) {
                 maxOf(policy.maxOutputTokens, 1024)
             } else {
                 policy.maxOutputTokens
             }
-            val effectiveThinkingBudget = if (useToolsOnPrimary) {
-                policy.thinkingBudgetTokens.coerceAtMost(256)
-            } else {
-                policy.thinkingBudgetTokens
-            }
             val turnExtraContext = mapOf("enable_thinking" to policy.allowThinking)
-            val turnThinkingConfig = ThinkingConfig(
-                enableThinking = policy.allowThinking,
-                thinkingTokenBudget = effectiveThinkingBudget
-            )
 
             var pacingDelayMs = policy.interChunkDelayMs
             var currentFgNice = policy.threadNicePriority
@@ -662,6 +647,9 @@ class LiteRtRuntimeManager(
 
                     if (combinedThought.isEmpty() && combinedVisible.isEmpty()) return@collect
 
+                    if (combinedThought.isNotEmpty() && capturedThought.length < 1500) {
+                        capturedThought.append(combinedThought)
+                    }
                     if (combinedVisible.isNotBlank()) {
                         totalVisibleChars += combinedVisible.trim().length
                     }
@@ -737,6 +725,9 @@ class LiteRtRuntimeManager(
                 } ?: lastSampledKvTokens
 
                 if (tailThought.isNotEmpty() || tailVisible.isNotEmpty()) {
+                    if (tailThought.isNotEmpty() && capturedThought.length < 1500) {
+                        capturedThought.append(tailThought)
+                    }
                     if (tailVisible.isNotBlank()) {
                         totalVisibleChars += tailVisible.trim().length
                     }
@@ -767,21 +758,21 @@ class LiteRtRuntimeManager(
                     conversation.sendMessageAsync(
                         Message.user(Contents.of(contentList)),
                         turnExtraContext,
-                        primaryRepetitionConfig,
-                        primaryNoRepeatConfig,
+                        null,
+                        null,
                         null,
                         effectiveMaxOutputTokens,
-                        turnThinkingConfig
+                        effectiveThinkingConfig
                     )
                 } else {
                     conversation.sendMessageAsync(
                         userPrompt,
                         turnExtraContext,
-                        primaryRepetitionConfig,
-                        primaryNoRepeatConfig,
+                        null,
+                        null,
                         null,
                         effectiveMaxOutputTokens,
-                        turnThinkingConfig
+                        effectiveThinkingConfig
                     )
                 }
                 collectMessageStream(messageFlow, parser)
@@ -825,6 +816,9 @@ class LiteRtRuntimeManager(
                 emptyList()
             }
 
+            val noThinkingConfig = ThinkingConfig(enableThinking = false, thinkingTokenBudget = 0)
+            val noThinkingExtra = mapOf("enable_thinking" to false)
+
             if (executedOutputs.isNotEmpty()) {
                 val synthesisSystem = buildString {
                     appendLine("Sei MobHarn, un assistente AI personale in italiano.")
@@ -851,60 +845,74 @@ class LiteRtRuntimeManager(
                     samplerConfig = SamplerConfig(
                         topK = profile.topK,
                         topP = profile.topP.toDouble(),
-                        temperature = profile.temperature.toDouble().coerceAtMost(0.6)
+                        temperature = profile.temperature.toDouble().coerceAtMost(0.55)
                     ),
                     automaticToolCalling = false,
-                    extraContext = mapOf("enable_thinking" to false),
-                    thinkingConfig = ThinkingConfig(enableThinking = false, thinkingTokenBudget = 0)
+                    extraContext = noThinkingExtra,
+                    thinkingConfig = noThinkingConfig
                 )
                 val synthConv = currentEngine.createConversation(synthConvConfig)
                 try {
                     val synthParser = ThinkingStreamParser()
                     val synthFlow = synthConv.sendMessageAsync(
                         synthesisPrompt,
-                        mapOf("enable_thinking" to false),
-                        RepetitionPenaltyConfig(
-                            repetitionPenalty = 1.06f,
-                            presencePenalty = 0.10f,
-                            frequencyPenalty = 0.05f,
-                            windowSize = 96
-                        ),
-                        NoRepeatNgramConfig(noRepeatNgramSize = 5, windowSize = 96),
+                        noThinkingExtra,
+                        null,
+                        null,
                         null,
                         policy.maxOutputTokens,
-                        ThinkingConfig(enableThinking = false, thinkingTokenBudget = 0)
+                        noThinkingConfig
                     )
                     collectMessageStream(synthFlow, synthParser)
                 } finally {
                     runCatching { synthConv.close() }
                     conversationNeedsReset = true
                 }
-            } else if (parseFailureFallback) {
-                // Parse error occurred without executable tool output — recover gracefully without raw error
+            } else if (parseFailureFallback || totalVisibleChars == 0) {
+                // Universal empty-reply / parse-error safety net: if the model stopped inside CoT or
+                // produced zero visible characters, immediately run a crisp, no-thinking, no-tools pass
+                // with the real system context (including live date/time & memories) so the user NEVER sees "(risposta vuota)".
+                closeConversationInternal()
+                val recoverySystem = systemInstruction.take(1800)
+                val recoverySeeds = mutableListOf<Message>()
+                var expUser = true
+                for ((role, content) in recentHistory.takeLast(4)) {
+                    val clean = ContextAndMemoryEngine.compactSingleMessage(content, 400)
+                    if (clean.isBlank()) continue
+                    if (expUser && role == "user") {
+                        recoverySeeds.add(Message.user(clean))
+                        expUser = false
+                    } else if (!expUser && role != "user") {
+                        recoverySeeds.add(Message.model(clean))
+                        expUser = true
+                    }
+                }
+                if (recoverySeeds.size % 2 != 0) recoverySeeds.removeAt(recoverySeeds.lastIndex)
+
                 val fallbackConvConfig = ConversationConfig(
-                    systemInstruction = Contents.of("Sei MobHarn, un assistente AI locale in italiano. Rispondi in modo utile e conciso."),
-                    initialMessages = emptyList(),
+                    systemInstruction = Contents.of(recoverySystem),
+                    initialMessages = recoverySeeds,
                     tools = emptyList(),
                     samplerConfig = SamplerConfig(
                         topK = profile.topK,
                         topP = profile.topP.toDouble(),
-                        temperature = profile.temperature.toDouble().coerceAtMost(0.7)
+                        temperature = profile.temperature.toDouble().coerceAtMost(0.55)
                     ),
                     automaticToolCalling = false,
-                    extraContext = mapOf("enable_thinking" to false),
-                    thinkingConfig = ThinkingConfig(enableThinking = false, thinkingTokenBudget = 0)
+                    extraContext = noThinkingExtra,
+                    thinkingConfig = noThinkingConfig
                 )
                 val fallbackConv = currentEngine.createConversation(fallbackConvConfig)
                 try {
                     val fallbackParser = ThinkingStreamParser()
                     val fallbackFlow = fallbackConv.sendMessageAsync(
                         userPrompt,
-                        mapOf("enable_thinking" to false),
+                        noThinkingExtra,
                         null,
-                        NoRepeatNgramConfig(noRepeatNgramSize = 6, windowSize = 128),
+                        null,
                         null,
                         policy.maxOutputTokens,
-                        ThinkingConfig(enableThinking = false, thinkingTokenBudget = 0)
+                        noThinkingConfig
                     )
                     collectMessageStream(fallbackFlow, fallbackParser)
                 } finally {
