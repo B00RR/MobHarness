@@ -1,0 +1,6 @@
+{
+  "name": "Hermes Edge",
+  "description": "On-device Gemma 4 agent harness and coding studio for Pixel using LiteRT-LM with local Hermes persistent memory, skills, Android tools, and sandboxed code execution.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

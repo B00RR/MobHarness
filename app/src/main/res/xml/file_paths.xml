@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <cache-path name="camera_images" path="camera/" />
+    <files-path name="workspace_files" path="workspace/" />
+    <files-path name="hermes_vault" path="hermes_vault/" />
+</paths>

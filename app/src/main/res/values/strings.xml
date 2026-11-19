@@ -1,0 +1,19 @@
+<resources>
+    <string name="app_name">Hermes Edge</string>
+    <string name="nav_chat">Chat</string>
+    <string name="nav_studio">Studio</string>
+    <string name="nav_memory">Memoria</string>
+    <string name="nav_model">Modello</string>
+    <string name="cd_open_drawer">Apri sessioni</string>
+    <string name="cd_new_session">Nuova sessione</string>
+    <string name="cd_attach_image">Allega immagine da galleria</string>
+    <string name="cd_capture_camera">Scatta foto</string>
+    <string name="cd_pick_skill">Scegli skill</string>
+    <string name="cd_send_message">Invia messaggio</string>
+    <string name="cd_stop_generation">Interrompi generazione</string>
+    <string name="cd_import_model">Importa modello .litertlm</string>
+    <string name="cd_export_markdown">Esporta memoria Markdown</string>
+    <string name="cd_export_zip">Esporta progetto ZIP</string>
+    <string name="cd_hero_banner">Illustrazione Hermes Edge per Gemma 4 on-device</string>
+    <string name="accessibility_service_description">Consente all\'agente locale Gemma 4 in Hermes Edge di leggere gli elementi sullo schermo ed eseguire tap, digitazione o scorrimenti su tua richiesta.</string>
+</resources>
