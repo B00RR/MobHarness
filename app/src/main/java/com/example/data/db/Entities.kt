@@ -28,7 +28,7 @@ data class ChatSessionEntity(
             onDelete = ForeignKey.CASCADE
         )
     ],
-    indices = [Index("sessionId")]
+    indices = [Index("sessionId"), Index(value = ["sessionId", "timestamp", "id"])]
 )
 data class ChatMessageEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,

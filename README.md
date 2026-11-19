@@ -146,3 +146,8 @@ gradle :app:testDebugUnitTest
 
 ### `v1.0.0` (`versionCode 1`)
 - Prima release completa di MobHarn con inferenza locale LiteRT-LM (Gemma 4), UI Material 3 pulita su 4 schede, pannello live attività agente e Chain of Thought (CoT), toolkit Android/Web/Coding/Sandbox/Phone-Use, Vault Markdown + Room FTS e protezioni termiche/batteria.
+
+## Firma, aggiornamenti e backup
+I branch producono solo artefatti di test; gli APK debug della CI non sono aggiornamenti installabili. Solo un nuovo tag `v<versionName>` su un commit di `main` pubblica una release dopo i test. Non riutilizzare un tag. Proteggere i tag `v*` e configurare l’ambiente GitHub `release` con revisori e accesso solo ai tag autorizzati. Conservare offline una copia sicura della chiave e delle password. Configurare nell’ambiente `RELEASE_KEYSTORE_B64` (keystore, alias `upload`), `STORE_PASSWORD`, `KEY_PASSWORD` e la variabile `RELEASE_CERT_SHA256` (digest esadecimale senza separatori). Nessuna chiave viene generata per le release.
+
+Le vecchie build fino a v1.1.2 possono avere firme incompatibili: non disinstallare per forzare un aggiornamento. Prima esportare e verificare ciò che si può recuperare: l’export Markdown non ripristina tutta l’app. Prima di una distribuzione provare su un dispositivo di test due versioni con la stessa firma: salvare una chat, installare la seconda senza disinstallare e riaprire la chat. Consultare [la politica di backup](docs/backup.md).

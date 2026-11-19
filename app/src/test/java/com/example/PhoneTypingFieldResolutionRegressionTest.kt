@@ -33,8 +33,8 @@ class PhoneTypingFieldResolutionRegressionTest {
             hintText = "Subject"
             text = ""
         }
-        root.addChild(toNode)
-        root.addChild(subjectNode)
+        org.robolectric.Shadows.shadowOf(root).addChild(toNode)
+        org.robolectric.Shadows.shadowOf(root).addChild(subjectNode)
 
         var targetedNode: AccessibilityNodeInfo? = null
         var setActionCalled = false
@@ -78,8 +78,8 @@ class PhoneTypingFieldResolutionRegressionTest {
             isEditable = true
             hintText = "Subject"
         }
-        root.addChild(toNode)
-        root.addChild(subjectNode)
+        org.robolectric.Shadows.shadowOf(root).addChild(toNode)
+        org.robolectric.Shadows.shadowOf(root).addChild(subjectNode)
 
         var actionAttempted = false
         val actionPerformer: (AccessibilityNodeInfo, Int, Bundle?) -> Boolean = { _, _, _ ->
@@ -113,8 +113,8 @@ class PhoneTypingFieldResolutionRegressionTest {
             isEditable = true
             hintText = "Subject"
         }
-        root.addChild(toNode)
-        root.addChild(subjectNode)
+        org.robolectric.Shadows.shadowOf(root).addChild(toNode)
+        org.robolectric.Shadows.shadowOf(root).addChild(subjectNode)
 
         var targetedNode: AccessibilityNodeInfo? = null
         val actionPerformer: (AccessibilityNodeInfo, Int, Bundle?) -> Boolean = { node, action, _ ->
@@ -151,8 +151,8 @@ class PhoneTypingFieldResolutionRegressionTest {
             isEditable = true
             hintText = "Subject"
         }
-        root.addChild(toNode)
-        root.addChild(subjectNode)
+        org.robolectric.Shadows.shadowOf(root).addChild(toNode)
+        org.robolectric.Shadows.shadowOf(root).addChild(subjectNode)
 
         val matchSubject = service.findEditableByQuery(root, "Subject")
         assertNotNull(matchSubject)

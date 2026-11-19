@@ -28,9 +28,6 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
 import java.io.InputStream
-import java.nio.file.AtomicMoveNotSupportedException
-import java.nio.file.Files
-import java.nio.file.StandardCopyOption
 import java.util.UUID
 
 class MobHarnRepository(
@@ -434,7 +431,7 @@ class MobHarnRepository(
                 }
 
                 val finalSize = tempFile.length()
-                if (totalBytes > 0 && finalSize != totalBytes) {
+                if (totalBytes >= 0 && finalSize != totalBytes) {
                     throw IOException("Dimensione file incompleta: attesi $totalBytes byte, ricevuti $finalSize byte.")
                 }
                 if (finalSize == 0L) {
@@ -485,31 +482,9 @@ class MobHarnRepository(
         }
     }
 
-    internal fun replaceAtomically(source: File, target: File) {
-        val sourcePath = source.toPath()
-        val targetPath = target.toPath()
-        try {
-            Files.move(
-                sourcePath,
-                targetPath,
-                StandardCopyOption.ATOMIC_MOVE,
-                StandardCopyOption.REPLACE_EXISTING
-            )
-        } catch (e: AtomicMoveNotSupportedException) {
-            Files.move(
-                sourcePath,
-                targetPath,
-                StandardCopyOption.REPLACE_EXISTING
-            )
-        } catch (e: Exception) {
-            if (target.exists()) {
-                target.delete()
-            }
-            if (!source.renameTo(target)) {
-                source.copyTo(target, overwrite = true)
-                source.delete()
-            }
-        }
+    private fun replaceAtomically(source: File, target: File) {
+        // Same directory, POSIX rename on Android: replace in one step or leave the old file intact.
+        if (!source.renameTo(target)) throw IOException("Impossibile sostituire il modello importato.")
     }
 
     companion object {
