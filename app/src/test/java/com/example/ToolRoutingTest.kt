@@ -12,6 +12,14 @@ class ToolRoutingTest {
     private val allEnabled = ToolGroup.entries.map { it.id }.toSet()
 
     @Test
+    fun phoneAvailableWithoutKeywordsOnlyWhenEnabled() {
+        val prompt = "Quali app ho aperte?"
+        assertEquals(setOf("phone_use"), routeToolGroupsForPrompt(prompt, allEnabled))
+        assertFalse("phone_use" in routeToolGroupsForPrompt(prompt, allEnabled - "phone_use"))
+        assertTrue("phone_use" in routeToolGroupsForPrompt("cerca il file", allEnabled))
+    }
+
+    @Test
     fun pureDateTimeAndPlainChatUseZeroTools() {
         assertEquals(emptySet<String>(), routeToolGroupsForPrompt("che giorno è oggi?", allEnabled))
         assertEquals(emptySet<String>(), routeToolGroupsForPrompt("che ore sono?", allEnabled))
