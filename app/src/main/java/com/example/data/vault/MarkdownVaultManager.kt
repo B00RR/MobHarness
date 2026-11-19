@@ -182,42 +182,13 @@ class MarkdownVaultManager(context: Context) {
         generatedContent: String
     ): String {
         val baseText = existingContent ?: defaultContent
-        val startIdx = baseText.indexOf(GENERATED_SECTION_START)
-        val endIdx = if (startIdx >= 0) {
-            baseText.indexOf(GENERATED_SECTION_END, startIdx + GENERATED_SECTION_START.length)
+        val block = "$GENERATED_SECTION_START\n${generatedContent.trim()}\n$GENERATED_SECTION_END"
+        val end = baseText.lastIndexOf(GENERATED_SECTION_END)
+        val start = if (end >= 0) baseText.lastIndexOf(GENERATED_SECTION_START, end) else -1
+        return if (start >= 0) {
+            baseText.replaceRange(start, end + GENERATED_SECTION_END.length, block)
         } else {
-            -1
-        }
-
-        val fullGeneratedBlock = buildString {
-            appendLine(GENERATED_SECTION_START)
-            appendLine(generatedContent.trim())
-            append(GENERATED_SECTION_END)
-        }
-
-        return if (startIdx >= 0 && endIdx >= 0) {
-            val prefix = baseText.substring(0, startIdx).trimEnd()
-            val suffix = baseText.substring(endIdx + GENERATED_SECTION_END.length).trimStart()
-            buildString {
-                if (prefix.isNotEmpty()) {
-                    append(prefix)
-                    append("\n\n")
-                }
-                append(fullGeneratedBlock)
-                if (suffix.isNotEmpty()) {
-                    append("\n\n")
-                    append(suffix)
-                }
-                append("\n")
-            }
-        } else {
-            // Unmarked text: treat existing text as user content
-            val userContent = baseText.trim()
-            if (userContent.isEmpty()) {
-                "$fullGeneratedBlock\n"
-            } else {
-                "$userContent\n\n$fullGeneratedBlock\n"
-            }
+            "$baseText\n\n$block\n"
         }
     }
 

@@ -363,29 +363,31 @@ class MobHarnRepository(
         uri: Uri,
         onProgress: (Float, String) -> Unit
     ): Result<ModelProfileEntity> = withContext(Dispatchers.IO) {
-        val resolver = context.contentResolver
-        var displayName = "gemma4_local.litertlm"
-        var totalBytes = -1L
+        runCatching {
+            val resolver = context.contentResolver
+            var displayName = "gemma4_local.litertlm"
+            var totalBytes = -1L
 
-        resolver.query(uri, null, null, null, null)?.use { cursor ->
-            if (cursor.moveToFirst()) {
-                val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
-                if (nameIdx >= 0) {
-                    displayName = cursor.getString(nameIdx) ?: displayName
-                }
-                if (sizeIdx >= 0 && !cursor.isNull(sizeIdx)) {
-                    totalBytes = cursor.getLong(sizeIdx)
+            resolver.query(uri, null, null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
+                    if (nameIdx >= 0) {
+                        displayName = cursor.getString(nameIdx) ?: displayName
+                    }
+                    if (sizeIdx >= 0 && !cursor.isNull(sizeIdx)) {
+                        totalBytes = cursor.getLong(sizeIdx)
+                    }
                 }
             }
-        }
 
-        importModelFromStream(
-            displayName = displayName,
-            totalBytes = totalBytes,
-            openStream = { resolver.openInputStream(uri) },
-            onProgress = onProgress
-        )
+            importModelFromStream(
+                displayName = displayName,
+                totalBytes = totalBytes,
+                openStream = { resolver.openInputStream(uri) },
+                onProgress = onProgress
+            ).getOrThrow()
+        }
     }
 
     internal suspend fun importModelFromStream(

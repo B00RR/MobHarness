@@ -87,7 +87,7 @@ class BackupPolicyRulesRegressionTest {
 
     @Test
     fun `backup documentation exists in docs backup md and not README`() {
-        val backupDoc = File(projectRoot, "docs/backup.md")
+        val backupDoc = File(appDir.parentFile, "docs/backup.md")
         assertTrue("docs/backup.md must exist", backupDoc.exists())
         val content = backupDoc.readText()
 
@@ -96,7 +96,7 @@ class BackupPolicyRulesRegressionTest {
         assertTrue("Must document device-to-device transfer", content.contains("Device Transfer", ignoreCase = true) || content.contains("Device-to-Device", ignoreCase = true))
         assertTrue("Must document restore recovery expectations", content.contains("Restore", ignoreCase = true))
 
-        val readmeFile = File(projectRoot, "README.md")
+        val readmeFile = File(appDir.parentFile, "README.md")
         if (readmeFile.exists()) {
             val readmeContent = readmeFile.readText()
             assertFalse(
