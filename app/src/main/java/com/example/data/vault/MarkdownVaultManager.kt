@@ -108,7 +108,11 @@ class MarkdownVaultManager(context: Context) {
             } else {
                 body
             }
-            file.writeText(content)
+            val temp = File.createTempFile("checkpoint-", ".tmp", sessionsDir)
+            try {
+                temp.writeText(content)
+                check(temp.renameTo(file)) { "Impossibile salvare il checkpoint" }
+            } finally { temp.delete() }
         }
     }
 
