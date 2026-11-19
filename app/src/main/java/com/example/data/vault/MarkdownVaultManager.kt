@@ -87,9 +87,8 @@ class MarkdownVaultManager(context: Context) {
         val userEntries = memories.filter {
             it.category == "USER_PROFILE" || it.category == "PREFERENCE"
         }
-        val userBuilder = StringBuilder().apply {
-            appendLine("# USER.md — Profilo & Preferenze Utente")
-            appendLine()
+        val userGenerated = buildString {
+            appendLine("## Memorie Strutturate & Preferenze")
             appendLine("_Aggiornato automaticamente da MobHarn (${dateFmt.format(Date())})_")
             appendLine()
             if (userEntries.isEmpty()) {
@@ -100,21 +99,26 @@ class MarkdownVaultManager(context: Context) {
                 }
             }
         }
-        userFile.writeText(userBuilder.toString())
+        val existingUserText = if (userFile.exists()) userFile.readText() else null
+        val updatedUserText = mergeGeneratedSection(
+            existingContent = existingUserText,
+            defaultContent = DEFAULT_USER_MD,
+            generatedContent = userGenerated
+        )
+        userFile.writeText(updatedUserText)
 
         val globalEntries = memories.filterNot {
             it.category == "USER_PROFILE" || it.category == "PREFERENCE"
         }
-        val memBuilder = StringBuilder().apply {
-            appendLine("# MEMORY.md — Memoria Persistente & Convenzioni")
-            appendLine()
+        val memGenerated = buildString {
+            appendLine("## Memoria Sincronizzata & Fatti")
             appendLine("_Aggiornato automaticamente da MobHarn (${dateFmt.format(Date())})_")
             appendLine()
             if (globalEntries.isEmpty()) {
                 appendLine("- Nessuna memoria globale ancora salvata.")
             } else {
                 globalEntries.groupBy { it.category }.forEach { (cat, list) ->
-                    appendLine("## $cat")
+                    appendLine("### $cat")
                     list.forEach { entry ->
                         appendLine("- **${entry.keyName}** (priorità ${entry.importance}/5): ${entry.content}")
                     }
@@ -122,7 +126,58 @@ class MarkdownVaultManager(context: Context) {
                 }
             }
         }
-        memoryFile.writeText(memBuilder.toString())
+        val existingMemText = if (memoryFile.exists()) memoryFile.readText() else null
+        val updatedMemText = mergeGeneratedSection(
+            existingContent = existingMemText,
+            defaultContent = DEFAULT_MEMORY_MD,
+            generatedContent = memGenerated
+        )
+        memoryFile.writeText(updatedMemText)
+    }
+
+    internal fun mergeGeneratedSection(
+        existingContent: String?,
+        defaultContent: String,
+        generatedContent: String
+    ): String {
+        val baseText = existingContent ?: defaultContent
+        val startIdx = baseText.indexOf(GENERATED_SECTION_START)
+        val endIdx = if (startIdx >= 0) {
+            baseText.indexOf(GENERATED_SECTION_END, startIdx + GENERATED_SECTION_START.length)
+        } else {
+            -1
+        }
+
+        val fullGeneratedBlock = buildString {
+            appendLine(GENERATED_SECTION_START)
+            appendLine(generatedContent.trim())
+            append(GENERATED_SECTION_END)
+        }
+
+        return if (startIdx >= 0 && endIdx >= 0) {
+            val prefix = baseText.substring(0, startIdx).trimEnd()
+            val suffix = baseText.substring(endIdx + GENERATED_SECTION_END.length).trimStart()
+            buildString {
+                if (prefix.isNotEmpty()) {
+                    append(prefix)
+                    append("\n\n")
+                }
+                append(fullGeneratedBlock)
+                if (suffix.isNotEmpty()) {
+                    append("\n\n")
+                    append(suffix)
+                }
+                append("\n")
+            }
+        } else {
+            // Unmarked text: treat existing text as user content
+            val userContent = baseText.trim()
+            if (userContent.isEmpty()) {
+                "$fullGeneratedBlock\n"
+            } else {
+                "$userContent\n\n$fullGeneratedBlock\n"
+            }
+        }
     }
 
     suspend fun syncSkillsToDisk(skills: List<AgentSkillEntity>) = withContext(Dispatchers.IO) {
@@ -175,6 +230,9 @@ class MarkdownVaultManager(context: Context) {
     }
 
     companion object {
+        const val GENERATED_SECTION_START = "<!-- MOBHARN_GENERATED_START -->"
+        const val GENERATED_SECTION_END = "<!-- MOBHARN_GENERATED_END -->"
+
         val DEFAULT_SOUL_MD = """
             # SOUL.md — Identità di MobHarn
 

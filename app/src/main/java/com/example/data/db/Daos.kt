@@ -164,6 +164,9 @@ interface ModelProfileDao {
     @Query("SELECT * FROM model_profiles WHERE id = :id")
     suspend fun getModelById(id: Long): ModelProfileEntity?
 
+    @Query("SELECT * FROM model_profiles WHERE filePath = :path LIMIT 1")
+    suspend fun getModelByPath(path: String): ModelProfileEntity?
+
     @Query("SELECT * FROM model_profiles ORDER BY importedAt DESC LIMIT 1")
     suspend fun getLatestModel(): ModelProfileEntity?
 
