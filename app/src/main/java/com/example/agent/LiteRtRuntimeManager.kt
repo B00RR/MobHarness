@@ -225,14 +225,18 @@ class LiteRtRuntimeManager(
             else -> "GPU"
         }
 
-        // RAM-aware context ceiling: allows 16K/32K long-horizon sessions on 12–16 GB phones
-        // while protecting tighter-RAM devices from OOM even when Eco Thermal pacing is on.
-        val freeRamGb = ramSnap?.systemFreeRamGb ?: 6.0
-        val ramAwareCap = when {
-            freeRamGb >= 6.5 -> 32768
-            freeRamGb >= 4.2 -> 16384
-            freeRamGb >= 2.6 -> 8192
-            else -> 4096
+        // Lean mobile-first KV-cache ceiling: pre-allocating 16K–32K KV tensors burns 1.2–2.4 GB of unified RAM.
+        // Long-horizon conversations are handled by our 3-tier rolling checkpoints + BM25 memory vault,
+        // keeping native GPU KV-cache compact (4K–6K in Eco mode, up to 16K only with Eco OFF & high free RAM).
+        val freeRamGb = ramSnap?.systemFreeRamGb ?: 5.0
+        val ramAwareCap = if (ecoThermalMode) {
+            if (freeRamGb < 3.5) 4096 else 6144
+        } else {
+            when {
+                freeRamGb >= 7.0 -> 16384
+                freeRamGb >= 4.5 -> 8192
+                else -> 6144
+            }
         }
         val requestedCtx = profile.maxNumTokens.coerceIn(2048, ramAwareCap)
         val wantVision = profile.supportsVision
@@ -401,19 +405,19 @@ class LiteRtRuntimeManager(
 
     fun onAppBackgrounded(autoUnloadEnabled: Boolean) {
         isAppInBackground = true
-        // Release Conversation KV-cache after 18s in background ONLY when idle (never interrupts active long jobs)
+        // Release Conversation KV-cache quickly (8s) in background when idle to free hundreds of MB of RAM
         idleKvTrimJob?.cancel()
         idleKvTrimJob = housekeepingScope.launch {
-            delay(18_000L)
+            delay(8_000L)
             if (!isTurnActive) {
                 trimConversationCacheAsync()
             }
         }
-        // If enabled, release full model weights faster when battery is low or Power Save is active
+        // Release full model weights in background to keep overall system RAM low
         backgroundUnloadJob?.cancel()
         if (autoUnloadEnabled && engine != null) {
             val snap = runCatching { ThermalAndMemoryGuard.readSnapshot(context) }.getOrNull()
-            val unloadDelayMs = if (snap?.isBatteryConstrained == true) 45_000L else 120_000L
+            val unloadDelayMs = if (snap?.isBatteryConstrained == true) 30_000L else 60_000L
             backgroundUnloadJob = housekeepingScope.launch {
                 delay(unloadDelayMs)
                 if (!isTurnActive) {
@@ -432,8 +436,9 @@ class LiteRtRuntimeManager(
     private fun scheduleIdleKvTrim() {
         idleKvTrimJob?.cancel()
         idleKvTrimJob = housekeepingScope.launch {
-            // Keep KV-cache warm for 3 minutes while reading/thinking in foreground so long sessions avoid re-prefill
-            delay(if (isAppInBackground) 20_000L else 180_000L)
+            // Trim idle KV-cache after 45s in foreground (10s in background) to keep RAM lean;
+            // next turn re-seeds instantly from the 3-tier Hot Window + Session Checkpoint.
+            delay(if (isAppInBackground) 10_000L else 45_000L)
             if (!isTurnActive) {
                 trimConversationCacheAsync()
             }
@@ -489,21 +494,21 @@ class LiteRtRuntimeManager(
 
         idleKvTrimJob?.cancel()
         backgroundUnloadJob?.cancel()
+        toolkitRegistry.monitor.beginTurn()
         isTurnActive = true
 
         try {
-            // Check if existing KV cache is near saturation (>72% of active context) or dirty
+            // Check if existing KV cache is near saturation (>70% of active context) or dirty
             val existingConv = activeConversation
-            val tokenLimit = activeMaxContextTokens.coerceIn(2048, 32768)
+            val tokenLimit = activeMaxContextTokens.coerceIn(2048, 16384)
             val currentTokens = if (existingConv != null && runCatching { existingConv.isAlive }.getOrDefault(false)) {
                 runCatching { existingConv.getTokenCount() }.getOrDefault(0)
             } else {
                 Int.MAX_VALUE
             }
-            val kvNearFull = currentTokens >= (tokenLimit * 0.72f).toInt()
+            val kvNearFull = currentTokens >= (tokenLimit * 0.70f).toInt()
 
-            // Sticky Session Tool Groups: if every required tool group is ALREADY registered in the warm
-            // conversation, reuse the warm KV-cache instead of wiping and re-prefilling the whole history!
+            // Sticky Session Tool Groups: reuse warm KV-cache when active tools already cover this turn
             val warmToolsSatisfyTurn = activeSessionConversationId == sessionId &&
                 activeToolGroupsSignature.isNotEmpty() &&
                 enabledToolGroups.all { it in activeToolGroupsSignature }
@@ -517,10 +522,10 @@ class LiteRtRuntimeManager(
 
             if (needsNewConversation) {
                 runCatching { existingConv?.close() }
-                // Bind sticky union up to 3 tool groups when staying in the same session so future turns reuse KV-cache
+                // Cap sticky union to 2 groups so tool schemas stay compact and KV-cache RAM remains lean
                 val groupsToBind = if (activeSessionConversationId == sessionId && !forceConversationReset && !kvNearFull) {
                     val union = activeToolGroupsSignature + enabledToolGroups
-                    if (union.size <= 3) union else enabledToolGroups
+                    if (union.size <= 2) union else enabledToolGroups
                 } else {
                     enabledToolGroups
                 }
@@ -529,7 +534,7 @@ class LiteRtRuntimeManager(
                 // Strictly alternating user -> model pairs ending with model, using head+tail compression
                 val seedMessages = mutableListOf<Message>()
                 var expectUser = true
-                val cappedHistory = recentHistory.takeLast((maxSeedMessages + 2).coerceAtMost(16))
+                val cappedHistory = recentHistory.takeLast((maxSeedMessages + 2).coerceAtMost(12))
                 for ((role, content) in cappedHistory) {
                     val clean = ContextAndMemoryEngine.compactSingleMessage(content, perMessageCharLimit)
                     if (clean.isBlank()) continue
@@ -545,7 +550,7 @@ class LiteRtRuntimeManager(
                 if (seedMessages.size % 2 != 0) {
                     seedMessages.removeAt(seedMessages.lastIndex)
                 }
-                val finalSeedMessages = seedMessages.takeLast(maxSeedMessages.coerceIn(2, 14))
+                val finalSeedMessages = seedMessages.takeLast(maxSeedMessages.coerceIn(2, 10))
                 val convConfig = ConversationConfig(
                     systemInstruction = Contents.of(systemInstruction),
                     initialMessages = finalSeedMessages,
@@ -572,12 +577,15 @@ class LiteRtRuntimeManager(
             val startMs = System.currentTimeMillis()
             var firstTokenMs = 0L
             var tokenCounter = 0
+            var totalVisibleChars = 0
             var lastSampledKvTokens = runCatching { conversation.getTokenCount() }.getOrDefault(0)
 
             val parser = ThinkingStreamParser()
             // CRITICAL: Never apply repetition/presence/frequency penalties when tools are enabled!
             // Gemma 4's tool schema repeats `<|"|>` dozens of times; penalizing it forces the model
             // to emit ASCII `"` instead of `<|"|>`, crashing LiteRT-LM's strict ANTLR FC parser.
+            // Meanwhile noRepeatNgramSize = 5 prevents `web_search_search_search` and CoT phrase loops
+            // without affecting single-token `<|"|>` delimiters.
             val useToolsOnPrimary = enabledToolGroups.isNotEmpty()
             val primaryRepetitionConfig = if (useToolsOnPrimary) {
                 null
@@ -590,13 +598,25 @@ class LiteRtRuntimeManager(
                 )
             }
             val primaryNoRepeatConfig = NoRepeatNgramConfig(
-                noRepeatNgramSize = if (useToolsOnPrimary) 10 else 6,
-                windowSize = 128
+                noRepeatNgramSize = 5,
+                windowSize = 96
             )
+            // On tool turns, reserve generous output budget & keep CoT concise so the model never runs
+            // out of tokens inside `<thought>` before writing its visible Italian answer.
+            val effectiveMaxOutputTokens = if (useToolsOnPrimary) {
+                maxOf(policy.maxOutputTokens, 1024)
+            } else {
+                policy.maxOutputTokens
+            }
+            val effectiveThinkingBudget = if (useToolsOnPrimary) {
+                policy.thinkingBudgetTokens.coerceAtMost(256)
+            } else {
+                policy.thinkingBudgetTokens
+            }
             val turnExtraContext = mapOf("enable_thinking" to policy.allowThinking)
             val turnThinkingConfig = ThinkingConfig(
                 enableThinking = policy.allowThinking,
-                thinkingTokenBudget = policy.thinkingBudgetTokens
+                thinkingTokenBudget = effectiveThinkingBudget
             )
 
             var pacingDelayMs = policy.interChunkDelayMs
@@ -642,6 +662,9 @@ class LiteRtRuntimeManager(
 
                     if (combinedThought.isEmpty() && combinedVisible.isEmpty()) return@collect
 
+                    if (combinedVisible.isNotBlank()) {
+                        totalVisibleChars += combinedVisible.trim().length
+                    }
                     if (firstTokenMs == 0L) {
                         firstTokenMs = System.currentTimeMillis() - startMs
                     }
@@ -714,6 +737,9 @@ class LiteRtRuntimeManager(
                 } ?: lastSampledKvTokens
 
                 if (tailThought.isNotEmpty() || tailVisible.isNotEmpty()) {
+                    if (tailVisible.isNotBlank()) {
+                        totalVisibleChars += tailVisible.trim().length
+                    }
                     val elapsedSec = ((System.currentTimeMillis() - startMs).coerceAtLeast(1L)) / 1000f
                     emit(
                         StreamChunk(
@@ -744,7 +770,7 @@ class LiteRtRuntimeManager(
                         primaryRepetitionConfig,
                         primaryNoRepeatConfig,
                         null,
-                        policy.maxOutputTokens,
+                        effectiveMaxOutputTokens,
                         turnThinkingConfig
                     )
                 } else {
@@ -754,7 +780,7 @@ class LiteRtRuntimeManager(
                         primaryRepetitionConfig,
                         primaryNoRepeatConfig,
                         null,
-                        policy.maxOutputTokens,
+                        effectiveMaxOutputTokens,
                         turnThinkingConfig
                     )
                 }
@@ -779,107 +805,82 @@ class LiteRtRuntimeManager(
                 }
             }
 
-            // Execute any recovered tool calls through our real tracked toolkit & synthesize the final answer
-            if (recoveredToolCalls.isNotEmpty()) {
-                val executedOutputs = withContext(Dispatchers.IO) {
-                    recoveredToolCalls.take(4).mapNotNull { call ->
+            // Collect tool outputs either from recovered tool calls OR from native tool calls whose
+            // turn exhausted its output/CoT budget before emitting any visible reply.
+            val executedOutputs: List<Pair<String, String>> = if (recoveredToolCalls.isNotEmpty()) {
+                val ran = withContext(Dispatchers.IO) {
+                    recoveredToolCalls.take(3).mapNotNull { call ->
                         val output = toolkitRegistry.invokeToolByName(call.name, call.args)
                         if (output != null) call.name to output else null
                     }
                 }
-
-                // Close tainted conversation and synthesize cleanly without tool grammar overhead
                 closeConversationInternal()
+                ran
+            } else if (!parseFailureFallback && totalVisibleChars == 0 && toolkitRegistry.monitor.getTurnOutputs().isNotEmpty()) {
+                // Native automatic tool calling ran tools successfully, but the model spent all tokens in <thought>
+                // without producing visible text — run a fast, clean no-thinking synthesis pass!
+                closeConversationInternal()
+                toolkitRegistry.monitor.getTurnOutputs().takeLast(3)
+            } else {
+                emptyList()
+            }
 
-                if (executedOutputs.isNotEmpty()) {
-                    val synthesisSystem = buildString {
-                        appendLine("Sei MobHarn, un assistente AI personale in italiano.")
-                        appendLine("Gli strumenti richiesti sono GIA' STATI ESEGUITI con successo qui sotto.")
-                        appendLine("Rispondi all'utente in modo chiaro, diretto e conciso basandoti SOLO sui risultati reali ottenuti. Non scrivere codice di chiamata tool.")
-                    }.trim()
-                    val synthesisPrompt = buildString {
-                        appendLine("Richiesta dell'utente:")
-                        appendLine(userPrompt)
+            if (executedOutputs.isNotEmpty()) {
+                val synthesisSystem = buildString {
+                    appendLine("Sei MobHarn, un assistente AI personale in italiano.")
+                    appendLine("Gli strumenti richiesti sono GIA' STATI ESEGUITI qui sotto.")
+                    appendLine("Rispondi all'utente in modo chiaro, diretto e conciso basandoti SOLO sui risultati reali ottenuti. Se i risultati non contengono il dato esatto, dillo onestamente. Non scrivere chiamate tool.")
+                }.trim()
+                val synthesisPrompt = buildString {
+                    appendLine("Richiesta dell'utente:")
+                    appendLine(userPrompt)
+                    appendLine()
+                    appendLine("Risultati reali ottenuti:")
+                    executedOutputs.forEach { (toolName, output) ->
+                        appendLine("[$toolName]:")
+                        appendLine(output.take(1400))
                         appendLine()
-                        appendLine("Risultati reali degli strumenti eseguiti:")
-                        executedOutputs.forEach { (toolName, output) ->
-                            appendLine("[$toolName]:")
-                            appendLine(output.take(1800))
-                            appendLine()
-                        }
-                        append("Fornisci ora la risposta finale all'utente in italiano:")
                     }
+                    append("Risposta finale diretta in italiano:")
+                }
 
-                    val synthConvConfig = ConversationConfig(
-                        systemInstruction = Contents.of(synthesisSystem),
-                        initialMessages = emptyList(),
-                        tools = emptyList(),
-                        samplerConfig = SamplerConfig(
-                            topK = profile.topK,
-                            topP = profile.topP.toDouble(),
-                            temperature = profile.temperature.toDouble().coerceAtMost(0.7)
+                val synthConvConfig = ConversationConfig(
+                    systemInstruction = Contents.of(synthesisSystem),
+                    initialMessages = emptyList(),
+                    tools = emptyList(),
+                    samplerConfig = SamplerConfig(
+                        topK = profile.topK,
+                        topP = profile.topP.toDouble(),
+                        temperature = profile.temperature.toDouble().coerceAtMost(0.6)
+                    ),
+                    automaticToolCalling = false,
+                    extraContext = mapOf("enable_thinking" to false),
+                    thinkingConfig = ThinkingConfig(enableThinking = false, thinkingTokenBudget = 0)
+                )
+                val synthConv = currentEngine.createConversation(synthConvConfig)
+                try {
+                    val synthParser = ThinkingStreamParser()
+                    val synthFlow = synthConv.sendMessageAsync(
+                        synthesisPrompt,
+                        mapOf("enable_thinking" to false),
+                        RepetitionPenaltyConfig(
+                            repetitionPenalty = 1.06f,
+                            presencePenalty = 0.10f,
+                            frequencyPenalty = 0.05f,
+                            windowSize = 96
                         ),
-                        automaticToolCalling = false,
-                        extraContext = mapOf("enable_thinking" to false),
-                        thinkingConfig = ThinkingConfig(enableThinking = false, thinkingTokenBudget = 0)
+                        NoRepeatNgramConfig(noRepeatNgramSize = 5, windowSize = 96),
+                        null,
+                        policy.maxOutputTokens,
+                        ThinkingConfig(enableThinking = false, thinkingTokenBudget = 0)
                     )
-                    val synthConv = currentEngine.createConversation(synthConvConfig)
-                    try {
-                        val synthParser = ThinkingStreamParser()
-                        val synthFlow = synthConv.sendMessageAsync(
-                            synthesisPrompt,
-                            mapOf("enable_thinking" to false),
-                            RepetitionPenaltyConfig(
-                                repetitionPenalty = 1.06f,
-                                presencePenalty = 0.10f,
-                                frequencyPenalty = 0.05f,
-                                windowSize = 96
-                            ),
-                            NoRepeatNgramConfig(noRepeatNgramSize = 6, windowSize = 128),
-                            null,
-                            policy.maxOutputTokens,
-                            ThinkingConfig(enableThinking = false, thinkingTokenBudget = 0)
-                        )
-                        collectMessageStream(synthFlow, synthParser)
-                    } finally {
-                        runCatching { synthConv.close() }
-                        conversationNeedsReset = true
-                    }
-                } else if (parseFailureFallback) {
-                    // Tool name was unrecognized: fall back cleanly to a direct response without showing C++ stack trace
-                    val fallbackConvConfig = ConversationConfig(
-                        systemInstruction = Contents.of("Sei MobHarn, un assistente AI locale in italiano. Rispondi in modo utile e conciso."),
-                        initialMessages = emptyList(),
-                        tools = emptyList(),
-                        samplerConfig = SamplerConfig(
-                            topK = profile.topK,
-                            topP = profile.topP.toDouble(),
-                            temperature = profile.temperature.toDouble().coerceAtMost(0.7)
-                        ),
-                        automaticToolCalling = false,
-                        extraContext = mapOf("enable_thinking" to false),
-                        thinkingConfig = ThinkingConfig(enableThinking = false, thinkingTokenBudget = 0)
-                    )
-                    val fallbackConv = currentEngine.createConversation(fallbackConvConfig)
-                    try {
-                        val fallbackParser = ThinkingStreamParser()
-                        val fallbackFlow = fallbackConv.sendMessageAsync(
-                            userPrompt,
-                            mapOf("enable_thinking" to false),
-                            null,
-                            NoRepeatNgramConfig(noRepeatNgramSize = 6, windowSize = 128),
-                            null,
-                            policy.maxOutputTokens,
-                            ThinkingConfig(enableThinking = false, thinkingTokenBudget = 0)
-                        )
-                        collectMessageStream(fallbackFlow, fallbackParser)
-                    } finally {
-                        runCatching { fallbackConv.close() }
-                        conversationNeedsReset = true
-                    }
+                    collectMessageStream(synthFlow, synthParser)
+                } finally {
+                    runCatching { synthConv.close() }
+                    conversationNeedsReset = true
                 }
             } else if (parseFailureFallback) {
-                // Parse error occurred but contained no extractable call — recover gracefully without raw error
+                // Parse error occurred without executable tool output — recover gracefully without raw error
                 val fallbackConvConfig = ConversationConfig(
                     systemInstruction = Contents.of("Sei MobHarn, un assistente AI locale in italiano. Rispondi in modo utile e conciso."),
                     initialMessages = emptyList(),

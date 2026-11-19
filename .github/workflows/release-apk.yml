@@ -48,32 +48,76 @@ jobs:
               -dname "CN=Android Debug,O=Android,C=US"
           fi
 
+      - name: Read app version from Gradle
+        id: app_version
+        run: |
+          VERSION_NAME=$(grep -E 'versionName\s*=' app/build.gradle.kts | head -n1 | sed -E 's/.*"([^"]+)".*/\1/')
+          VERSION_CODE=$(grep -E 'versionCode\s*=' app/build.gradle.kts | head -n1 | sed -E 's/[^0-9]*([0-9]+).*/\1/')
+          TAG="v${VERSION_NAME}"
+          APK_NAME="MobHarn-${TAG}.apk"
+          echo "version_name=${VERSION_NAME}" >> "$GITHUB_OUTPUT"
+          echo "version_code=${VERSION_CODE}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "apk_name=${APK_NAME}" >> "$GITHUB_OUTPUT"
+          echo "Detected MobHarn ${TAG} (build ${VERSION_CODE}) -> ${APK_NAME}"
+
       - name: Build Debug APK
         run: gradle :app:assembleDebug --no-daemon
 
-      - name: Prepare APK asset
+      - name: Prepare versioned APK asset
+        env:
+          APK_NAME: ${{ steps.app_version.outputs.apk_name }}
         run: |
-          cp app/build/outputs/apk/debug/app-debug.apk MobHarn-latest.apk
-          ls -lh MobHarn-latest.apk
+          cp app/build/outputs/apk/debug/app-debug.apk "$APK_NAME"
+          ls -lh "$APK_NAME"
 
       - name: Upload Build Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MobHarn-APK
-          path: MobHarn-latest.apk
+          name: MobHarn-APK-${{ steps.app_version.outputs.tag }}
+          path: ${{ steps.app_version.outputs.apk_name }}
           retention-days: 30
 
-      - name: Publish GitHub Release
+      - name: Publish Versioned GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION_NAME: ${{ steps.app_version.outputs.version_name }}
+          VERSION_CODE: ${{ steps.app_version.outputs.version_code }}
+          TAG: ${{ steps.app_version.outputs.tag }}
+          APK_NAME: ${{ steps.app_version.outputs.apk_name }}
         run: |
-          NOTES="Build automatica di **MobHarn** (Gemma 4 LiteRT-LM + Memoria Markdown locale + Coding Studio + Controllo Schermo + Eco Termico).\n\nCommit: \`${GITHUB_SHA::7}\`\n\n### Installazione sul Pixel\n1. Tocca **MobHarn-latest.apk** qui sotto per scaricarlo.\n2. Apri il file scaricato e consenti l'installazione da origini sconosciute.\n3. In **Modello**, importa il tuo file \`.litertlm\` di Gemma 4."
-          if gh release view latest >/dev/null 2>&1; then
-            gh release upload latest MobHarn-latest.apk --clobber
-            gh release edit latest --title "MobHarn — Ultima Build Android" --notes "$(printf '%b' "$NOTES")"
+          CHANGELOG_BLOCK=$(awk -v ver="### \`${TAG}\`" '
+            index($0, ver) == 1 { found=1; next }
+            found && /^### / { exit }
+            found { print }
+          ' README.md)
+
+          if [ -z "$CHANGELOG_BLOCK" ]; then
+            CHANGELOG_BLOCK="- Build automatica di MobHarn ${TAG} (build ${VERSION_CODE})."
+          fi
+
+          cat <<EOF > release_notes.md
+          Build Android **MobHarn ${TAG}** (\`versionCode ${VERSION_CODE}\`) — Gemma 4 LiteRT-LM on-device, contesto lungo con auto-compattamento a 3 livelli, ricerca BM25, Coding Studio, controllo schermo e background zero-lag.
+
+          Commit: \`${GITHUB_SHA::7}\`
+
+          ### Novità in ${TAG}
+          ${CHANGELOG_BLOCK}
+
+          ### Installazione sul Pixel
+          1. Scarica **${APK_NAME}** qui sotto.
+          2. Apri il file scaricato e consenti l'installazione/aggiornamento (mantiene modelli, memorie e skill già salvati).
+          3. Verifica in fondo alla scheda **Modello** la dicitura \`MobHarn ${TAG} (build ${VERSION_CODE})\`.
+          EOF
+
+          TITLE="MobHarn ${TAG} (build ${VERSION_CODE})"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$APK_NAME" --clobber
+            gh release edit "$TAG" --title "$TITLE" --notes-file release_notes.md --latest
           else
-            gh release create latest MobHarn-latest.apk \
-              --title "MobHarn — Ultima Build Android" \
-              --notes "$(printf '%b' "$NOTES")" \
+            gh release create "$TAG" "$APK_NAME" \
+              --target "$GITHUB_SHA" \
+              --title "$TITLE" \
+              --notes-file release_notes.md \
               --latest
           fi

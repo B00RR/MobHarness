@@ -560,8 +560,12 @@ private fun ModelProfileCard(
                         )
                     }
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        items(listOf(4096, 8192, 16384, 32768)) { ctx ->
-                            val label = "${ctx / 1024}K"
+                        items(listOf(4096, 6144, 8192, 16384)) { ctx ->
+                            val label = when (ctx) {
+                                4096 -> "4K Min RAM"
+                                6144 -> "6K Eco"
+                                else -> "${ctx / 1024}K"
+                            }
                             FilterChip(
                                 selected = profile.maxNumTokens == ctx,
                                 onClick = { onUpdate(profile.copy(maxNumTokens = ctx)) },
@@ -569,13 +573,15 @@ private fun ModelProfileCard(
                             )
                         }
                     }
-                    if (profile.maxNumTokens >= 16384) {
-                        Text(
-                            text = "Contesto lungo adattivo alla RAM libera, con auto-compattamento automatico per lavori lunghi.",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
+                    Text(
+                        text = if (profile.maxNumTokens >= 8192) {
+                            "Con Modalità Eco attiva la KV-cache resta ≤ 6K per risparmiare RAM; le chat lunghe usano l'auto-compattamento."
+                        } else {
+                            "RAM ridotta: la KV-cache resta leggera mentre l'auto-compattamento gestisce conversazioni lunghe."
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                     Column {
                         Text(
                             String.format(Locale.US, "Temperatura: %.2f", profile.temperature),

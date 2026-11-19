@@ -79,6 +79,21 @@ class ToolExecutionMonitor(
     @Volatile var requireApprovalForExternal: Boolean = true
     @Volatile var onLiveTraceUpdate: ((ToolCallTrace) -> Unit)? = null
 
+    private val turnLock = Any()
+    private val turnCallSignatures = mutableListOf<Pair<String, String>>()
+    private val turnToolOutputs = mutableListOf<Pair<String, String>>()
+
+    fun beginTurn() {
+        synchronized(turnLock) {
+            turnCallSignatures.clear()
+            turnToolOutputs.clear()
+        }
+    }
+
+    fun getTurnOutputs(): List<Pair<String, String>> = synchronized(turnLock) {
+        turnToolOutputs.toList()
+    }
+
     fun executeTracked(
         toolName: String,
         category: String,
@@ -87,6 +102,24 @@ class ToolExecutionMonitor(
         approvalDescription: String = "",
         block: suspend () -> String
     ): String = runBlocking {
+        val normSig = toolName.lowercase() to argsSummary.trim().lowercase().replace(Regex("\\s+"), " ")
+        val duplicateGuardMsg: String? = synchronized(turnLock) {
+            val sameExact = turnCallSignatures.any { it == normSig }
+            val sameToolCount = turnCallSignatures.count { it.first == normSig.first }
+            when {
+                sameExact -> "Hai già eseguito $toolName con questi stessi parametri. NON richiamare altri tool: rispondi subito all'utente in italiano usando i dati già ottenuti."
+                sameToolCount >= 2 && toolName == "web_search" -> "Hai già effettuato 2 ricerche web in questo turno. NON fare altre ricerche: rispondi ora all'utente in italiano con le informazioni raccolte."
+                turnCallSignatures.size >= 5 -> "Limite di chiamate tool per turno raggiunto. Rispondi subito all'utente in italiano con i risultati già ottenuti."
+                else -> {
+                    turnCallSignatures.add(normSig)
+                    null
+                }
+            }
+        }
+        if (duplicateGuardMsg != null) {
+            return@runBlocking duplicateGuardMsg
+        }
+
         val traceId = UUID.randomUUID().toString()
         val start = System.currentTimeMillis()
         onLiveTraceUpdate?.invoke(
@@ -117,10 +150,17 @@ class ToolExecutionMonitor(
             }
         }
 
-        val (ok, result) = runCatching { block() }.fold(
+        val (ok, rawResult) = runCatching { block() }.fold(
             onSuccess = { true to it },
             onFailure = { false to "Errore $toolName: ${it.message}" }
         )
+        // Keep tool outputs crisp so KV-cache RAM never spikes on small edge models
+        val result = rawResult.take(1600)
+        if (ok && result.isNotBlank()) {
+            synchronized(turnLock) {
+                turnToolOutputs.add(toolName to result)
+            }
+        }
         val elapsed = System.currentTimeMillis() - start
         onLiveTraceUpdate?.invoke(
             ToolCallTrace(

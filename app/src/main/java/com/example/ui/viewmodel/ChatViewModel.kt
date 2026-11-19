@@ -483,7 +483,8 @@ class ChatViewModel(
             var thinkingStartMs = 0L
             var thinkingDoneSec = 0
             var latestContextUsed = _uiState.value.contextTokensUsed
-            var latestContextMax = ready.model.maxNumTokens.coerceIn(2048, 32768)
+            val runtimeMaxCtx = runtime.getActiveContextStats().second
+            var latestContextMax = (if (runtimeMaxCtx > 0) runtimeMaxCtx else ready.model.maxNumTokens).coerceIn(2048, 16384)
 
             try {
                 val routedGroups = container.toolkitRegistry.selectRoutedToolGroups(
@@ -587,8 +588,16 @@ class ChatViewModel(
                 }
 
                 val cleanedVisible = ToolCallRecoveryParser.stripRawToolCallMarkup(visibleBuilder.toString()).trim()
-                val finalText = cleanedVisible
-                    .ifBlank { if (traces.isNotEmpty()) "Strumenti eseguiti con successo." else "(risposta vuota)" }
+                val finalText = cleanedVisible.ifBlank {
+                    val lastGoodTrace = traces.lastOrNull { it.status == "success" && it.resultSummary.isNotBlank() }
+                    if (lastGoodTrace != null) {
+                        "Ecco i dati raccolti da ${lastGoodTrace.toolName}:\n\n${lastGoodTrace.resultSummary}"
+                    } else if (traces.isNotEmpty()) {
+                        "Ho eseguito gli strumenti richiesti, ma non sono stati restituiti dati utili per rispondere."
+                    } else {
+                        "(risposta vuota)"
+                    }
+                }
 
                 // Continuous-learning safety net: if the user explicitly asked to remember/note a fact
                 // or learn/create a skill and the model forgot to invoke save_memory/save_skill, capture it!

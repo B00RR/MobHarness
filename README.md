@@ -1,8 +1,8 @@
-# MobHarn `v1.1.0`
+# MobHarn `v1.1.1`
 
 **MobHarn** è un'applicazione Android (Kotlin + Jetpack Compose) progettata come **agent harness AI completamente on-device**, alimentata da **LiteRT-LM** (Google AI Edge) e modelli locali `.litertlm` (come **Gemma 4**).
 
-> **Versione corrente:** `v1.1.0` (`versionCode 2`) — aggiornata con contesto lungo adattivo (`4K`–`32K`), auto-compattamento deterministico, ricerca ibrida BM25 per memorie/chat/skill, protezione NPU pre-flight ed esecuzione background zero-lag.
+> **Versione corrente:** `v1.1.1` (`versionCode 3`) — ricerca web fattuale potenziata (Wikipedia lead extracts + DuckDuckGo Web), guardia anti-loop sui tool, sintesi automatica della risposta finale e riduzione significativa dell'uso di RAM sulla KV-cache.
 
 L'app esegue inferenza locale con supporto **NPU (Google Tensor G5+ AOT), GPU e CPU**, **Chain of Thought (CoT) visibile in tempo reale**, **esecuzione reale di strumenti Android/Web/Coding**, apprendimento continuo (memoria + skill riutilizzabili), sandbox JavaScript/SQLite offline e protezioni avanzate per **RAM, temperatura, batteria e fluidità di sistema**.
 
@@ -124,6 +124,11 @@ gradle :app:testDebugUnitTest
 ---
 
 ## Cronologia Versioni (Changelog)
+
+### `v1.1.1` (`versionCode 3`)
+- **Ricerca web fattuale precisa (`web_search`)**: priorità agli estratti introduttivi completi di **Wikipedia IT/EN** (con estrazione automatica dell'entità core es. *"popolazione Cardito NA"* → *"Cardito"*), ricerca web reale su **DuckDuckGo HTML/Lite** sempre attiva e rimozione dei link redirect chilometrici di Google News (che ora interviene solo per richieste di notizie o fallback).
+- **Stop loop tool e mai più output vuoti `"Strumenti eseguiti con successo."`**: aggiunta guardia anti-duplicati per turno, `noRepeatNgramSize = 5` (evita loop come `web_search_search_search`), budget output ampliato sui turni con tool e **sintesi finale automatica** se il modello esaurisce i token nel ragionamento CoT dopo aver eseguito un tool.
+- **Riduzione drastica RAM**: KV-cache nativa limitata a `4K–6K` in Modalità Eco (delegando i lavori lunghi all'auto-compattamento a 3 livelli invece di pre-allocare 1.2–2.4 GB di VRAM), trim KV a riposo ridotto a `45s` in foreground / `8s` in background, auto-scaricamento a `60s` (`30s` con batteria bassa) e Sticky Tool-Groups limitati a 2 gruppi.
 
 ### `v1.1.0` (`versionCode 2`)
 - **Contesto lungo & architettura a 3 livelli (`4K` / `8K` / `16K` / `32K`)**: finestra adattiva alla RAM libera, *Hot Window* con compressione testa+coda, *Sticky Tool-Groups* per mantenere calda la KV-cache tra i turni e barra discreta di occupazione contesto in Chat.

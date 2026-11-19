@@ -373,130 +373,216 @@ class AndroidSystemActions(private val context: Context) {
 
         val encoded = URLEncoder.encode(cleanQuery, "UTF-8")
         val sections = mutableListOf<String>()
+        val wikiUa = "MobHarnAndroid/1.1 (https://mobharn.local; on-device assistant)"
 
-        // 1. DuckDuckGo Instant Answer JSON API (fast factual answers, zero CAPTCHA)
-        runCatching {
-            val req = Request.Builder()
-                .url("https://api.duckduckgo.com/?q=$encoded&format=json&no_html=1&skip_disambig=1")
-                .header("User-Agent", "MobHarn/1.0 (Android)")
-                .build()
-            httpClient.newCall(req).execute().use { resp ->
-                if (resp.isSuccessful) {
-                    val body = resp.body?.string().orEmpty()
-                    val json = org.json.JSONObject(body)
-                    val abstractText = json.optString("AbstractText").trim()
-                    val abstractUrl = json.optString("AbstractURL").trim()
-                    val answer = json.optString("Answer").trim()
-                    val lines = mutableListOf<String>()
-                    if (answer.isNotBlank()) lines.add("- Risposta rapida: $answer")
-                    if (abstractText.isNotBlank()) {
-                        lines.add("- Sintesi: ${abstractText.take(360)}" + if (abstractUrl.isNotBlank()) " ($abstractUrl)" else "")
-                    }
-                    val related = json.optJSONArray("RelatedTopics")
-                    if (related != null && lines.isEmpty()) {
-                        for (i in 0 until minOf(related.length(), 3)) {
-                            val item = related.optJSONObject(i) ?: continue
-                            val txt = item.optString("Text").trim()
-                            val url = item.optString("FirstURL").trim()
-                            if (txt.isNotBlank()) {
-                                lines.add("- ${txt.take(200)}" + if (url.isNotBlank()) " ($url)" else "")
-                            }
-                        }
-                    }
-                    if (lines.isNotEmpty()) {
-                        sections.add("### Risposte Dirette\n" + lines.joinToString("\n"))
-                    }
-                }
+        // Helper: strip Italian/English question words & 2-letter province codes to isolate core entity for Wikipedia
+        // e.g. "popolazione Cardito NA" -> "Cardito", "quanti abitanti ha Cardito (NA)?" -> "Cardito"
+        fun extractCoreEntity(raw: String): String {
+            val noise = setOf(
+                "popolazione", "abitanti", "quanti", "quante", "quanto", "qual", "quale", "cosa",
+                "chi", "dove", "quando", "come", "perche", "perché", "storia", "superficie",
+                "sindaco", "capitale", "altezza", "meteo", "notizie", "ultime", "oggi", "attuale",
+                "attuali", "numero", "comune", "citta", "città", "provincia", "regione", "italia",
+                "population", "inhabitants", "what", "who", "where", "when", "how", "many",
+                "del", "della", "dello", "dei", "degli", "delle", "di", "da", "in", "su", "per",
+                "ha", "sono", "è", "e", "il", "lo", "la", "le", "gli", "un", "una", "suo", "sua"
+            )
+            val cleaned = raw
+                .replace(Regex("""\([A-Za-z]{2}\)"""), " ")
+                .replace(Regex("""[^\p{L}\p{N}\s'-]"""), " ")
+            val tokens = cleaned.split(Regex("\\s+")).filter { tok ->
+                val low = tok.lowercase()
+                tok.length >= 2 &&
+                    low !in noise &&
+                    !(tok.length == 2 && tok == tok.uppercase()) // strip province abbreviations like NA, MI, RM
             }
+            return tokens.joinToString(" ").trim()
         }
 
-        // 2. Google News RSS (official XML feed, never CAPTCHA-blocked, ideal for recent news & live info)
+        // 1. Wikipedia Search + Lead Extract (IT with EN fallback) — gives exact encyclopedic facts (e.g. population)
         runCatching {
-            val req = Request.Builder()
-                .url("https://news.google.com/rss/search?q=$encoded&hl=it&gl=IT&ceid=IT:it")
-                .header("User-Agent", "Mozilla/5.0 (Linux; Android 15; Pixel 10 Pro XL) AppleWebKit/537.36")
-                .header("Accept-Language", "it-IT,it;q=0.9,en;q=0.8")
-                .build()
-            httpClient.newCall(req).execute().use { resp ->
-                if (resp.isSuccessful) {
-                    val xml = resp.body?.string().orEmpty()
-                    val itemRegex = Regex("<item>(.*?)</item>", RegexOption.DOT_MATCHES_ALL)
-                    val titleRegex = Regex("<title>(.*?)</title>", RegexOption.DOT_MATCHES_ALL)
-                    val pubDateRegex = Regex("<pubDate>(.*?)</pubDate>", RegexOption.DOT_MATCHES_ALL)
-                    val linkRegex = Regex("<link>(.*?)</link>", RegexOption.DOT_MATCHES_ALL)
-                    val newsLines = itemRegex.findAll(xml).take(5).mapNotNull { m ->
-                        val block = m.groupValues[1]
-                        val title = stripHtml(
-                            titleRegex.find(block)?.groupValues?.get(1).orEmpty()
-                                .removePrefix("<![CDATA[").removeSuffix("]]>")
-                        )
-                        val date = stripHtml(pubDateRegex.find(block)?.groupValues?.get(1).orEmpty())
-                            .substringBeforeLast(" GMT").take(22)
-                        val link = stripHtml(linkRegex.find(block)?.groupValues?.get(1).orEmpty())
-                        if (title.isBlank()) null
-                        else "- $title" + (if (date.isNotBlank()) " [$date]" else "") + (if (link.isNotBlank()) "\n  URL: $link" else "")
-                    }.toList()
-                    if (newsLines.isNotEmpty()) {
-                        sections.add("### Notizie & Risultati Recenti (Google News)\n" + newsLines.joinToString("\n"))
-                    }
+            fun fetchWikiLeadExtract(lang: String, title: String): String? {
+                val encTitle = URLEncoder.encode(title, "UTF-8")
+                val url = "https://$lang.wikipedia.org/w/api.php?action=query&prop=extracts&exintro=1&explaintext=1&exchars=520&redirects=1&titles=$encTitle&format=json"
+                val req = Request.Builder().url(url).header("User-Agent", wikiUa).build()
+                return httpClient.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) return@use null
+                    val json = org.json.JSONObject(resp.body?.string().orEmpty())
+                    val pages = json.optJSONObject("query")?.optJSONObject("pages") ?: return@use null
+                    val firstKey = pages.keys().asSequence().firstOrNull() ?: return@use null
+                    if (firstKey == "-1") return@use null
+                    val page = pages.optJSONObject(firstKey) ?: return@use null
+                    val pageTitle = page.optString("title").trim()
+                    val extract = page.optString("extract").replace(Regex("\\s+"), " ").trim()
+                    if (extract.length >= 30) "$pageTitle: ${extract.take(480)}" else null
                 }
             }
-        }
 
-        // 3. Wikipedia Search API (IT with EN fallback — official JSON API, zero CAPTCHA)
-        runCatching {
-            fun queryWiki(lang: String): List<String> {
+            fun searchWikiBest(lang: String, q: String): List<String> {
+                if (q.isBlank()) return emptyList()
+                val encQ = URLEncoder.encode(q, "UTF-8")
                 val req = Request.Builder()
-                    .url("https://$lang.wikipedia.org/w/api.php?action=query&list=search&srsearch=$encoded&utf8=&format=json&srlimit=3")
-                    .header("User-Agent", "MobHarn/1.0 (Android)")
+                    .url("https://$lang.wikipedia.org/w/api.php?action=query&list=search&srsearch=$encQ&utf8=&format=json&srlimit=3")
+                    .header("User-Agent", wikiUa)
                     .build()
                 return httpClient.newCall(req).execute().use { resp ->
                     if (!resp.isSuccessful) return@use emptyList()
                     val json = org.json.JSONObject(resp.body?.string().orEmpty())
                     val arr = json.optJSONObject("query")?.optJSONArray("search") ?: return@use emptyList()
-                    (0 until arr.length()).mapNotNull { idx ->
-                        val o = arr.optJSONObject(idx) ?: return@mapNotNull null
+                    val out = mutableListOf<String>()
+                    for (idx in 0 until arr.length()) {
+                        val o = arr.optJSONObject(idx) ?: continue
                         val title = o.optString("title").trim()
+                        if (title.isBlank()) continue
+                        if (idx == 0) {
+                            val lead = runCatching { fetchWikiLeadExtract(lang, title) }.getOrNull()
+                            if (!lead.isNullOrBlank()) {
+                                out.add("- $lead")
+                                continue
+                            }
+                        }
                         val snippet = stripHtml(o.optString("snippet"))
-                        if (title.isBlank()) null
-                        else {
-                            val pageUrl = "https://$lang.wikipedia.org/wiki/${URLEncoder.encode(title.replace(' ', '_'), "UTF-8")}"
-                            "- $title: ${snippet.take(220)} ($pageUrl)"
+                        if (snippet.isNotBlank()) {
+                            out.add("- $title: ${snippet.take(180)}")
                         }
                     }
+                    out
                 }
             }
-            val wikiHits = queryWiki("it").ifEmpty { queryWiki("en") }
+
+            val coreEntity = extractCoreEntity(cleanQuery)
+            val wikiHits = buildList {
+                // First try direct entity lookup if distinct from full query (e.g. "Cardito" for "popolazione Cardito NA")
+                if (coreEntity.isNotBlank() && !coreEntity.equals(cleanQuery, ignoreCase = true)) {
+                    val directLead = runCatching { fetchWikiLeadExtract("it", coreEntity) }.getOrNull()
+                    if (!directLead.isNullOrBlank()) {
+                        add("- $directLead")
+                    } else {
+                        addAll(searchWikiBest("it", coreEntity).take(2))
+                    }
+                }
+                if (isEmpty()) {
+                    addAll(searchWikiBest("it", cleanQuery).take(2))
+                }
+                if (isEmpty() && coreEntity.isNotBlank()) {
+                    addAll(searchWikiBest("en", coreEntity).take(2))
+                }
+                if (isEmpty()) {
+                    addAll(searchWikiBest("en", cleanQuery).take(2))
+                }
+            }.distinct().take(2)
+
             if (wikiHits.isNotEmpty()) {
                 sections.add("### Enciclopedia (Wikipedia)\n" + wikiHits.joinToString("\n"))
             }
         }
 
-        // 4. DuckDuckGo Lite POST fallback if still empty
+        // 2. Real Web Search (DuckDuckGo HTML/Lite — ALWAYS attempted for general web coverage, not skipped on news)
+        runCatching {
+            val formBody = okhttp3.FormBody.Builder()
+                .add("q", cleanQuery)
+                .add("kl", "it-it")
+                .build()
+            val req = Request.Builder()
+                .url("https://html.duckduckgo.com/html/")
+                .post(formBody)
+                .header("User-Agent", "Mozilla/5.0 (Linux; Android 15; Pixel 10 Pro XL) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Mobile Safari/537.36")
+                .header("Accept-Language", "it-IT,it;q=0.9,en;q=0.8")
+                .build()
+            val webLines = httpClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return@use emptyList()
+                val html = resp.body?.string().orEmpty()
+                val titleRegex = Regex("""class=['"][^'"]*result__a[^'"]*['"][^>]*>(.*?)</a>""", RegexOption.DOT_MATCHES_ALL)
+                val snippetRegex = Regex("""class=['"][^'"]*result__snippet[^'"]*['"][^>]*>(.*?)</(?:a|div|span)>""", RegexOption.DOT_MATCHES_ALL)
+                val titles = titleRegex.findAll(html).map { stripHtml(it.groupValues[1]) }.take(4).toList()
+                val snippets = snippetRegex.findAll(html).map { stripHtml(it.groupValues[1]) }.take(4).toList()
+                titles.mapIndexedNotNull { idx, t ->
+                    val s = snippets.getOrNull(idx).orEmpty()
+                    if (t.isBlank() && s.isBlank()) null
+                    else "- $t: ${s.take(190)}"
+                }
+            }.ifEmpty {
+                // Fallback to DuckDuckGo Lite
+                val liteBody = okhttp3.FormBody.Builder().add("q", cleanQuery).build()
+                val liteReq = Request.Builder()
+                    .url("https://lite.duckduckgo.com/lite/")
+                    .post(liteBody)
+                    .header("User-Agent", "Mozilla/5.0 (Linux; Android 15; Pixel 10 Pro XL) AppleWebKit/537.36 Chrome/134.0.0.0 Mobile Safari/537.36")
+                    .header("Accept-Language", "it-IT,it;q=0.9,en;q=0.8")
+                    .build()
+                httpClient.newCall(liteReq).execute().use { resp ->
+                    if (!resp.isSuccessful) return@use emptyList()
+                    val html = resp.body?.string().orEmpty()
+                    val linkRegex = Regex("""class=['"]result-link['"][^>]*>(.*?)</a>""", RegexOption.DOT_MATCHES_ALL)
+                    val snippetRegex = Regex("""class=['"]result-snippet['"][^>]*>(.*?)</td>""", RegexOption.DOT_MATCHES_ALL)
+                    val titles = linkRegex.findAll(html).map { stripHtml(it.groupValues[1]) }.take(4).toList()
+                    val snippets = snippetRegex.findAll(html).map { stripHtml(it.groupValues[1]) }.take(4).toList()
+                    titles.mapIndexedNotNull { idx, t ->
+                        val s = snippets.getOrNull(idx).orEmpty()
+                        if (t.isBlank() && s.isBlank()) null
+                        else "- $t: ${s.take(190)}"
+                    }
+                }
+            }
+            if (webLines.isNotEmpty()) {
+                sections.add("### Risultati Web\n" + webLines.joinToString("\n"))
+            }
+        }
+
+        // 3. DuckDuckGo Instant Answer JSON API (fast direct answers/definitions if still light)
         if (sections.isEmpty()) {
             runCatching {
-                val formBody = okhttp3.FormBody.Builder().add("q", cleanQuery).build()
                 val req = Request.Builder()
-                    .url("https://lite.duckduckgo.com/lite/")
-                    .post(formBody)
-                    .header("User-Agent", "Mozilla/5.0 (Linux; Android 15; Pixel 10 Pro XL) AppleWebKit/537.36 Chrome/134.0.0.0 Mobile Safari/537.36")
+                    .url("https://api.duckduckgo.com/?q=$encoded&format=json&no_html=1&skip_disambig=1")
+                    .header("User-Agent", wikiUa)
+                    .build()
+                httpClient.newCall(req).execute().use { resp ->
+                    if (resp.isSuccessful) {
+                        val json = org.json.JSONObject(resp.body?.string().orEmpty())
+                        val answer = json.optString("Answer").trim()
+                        val abstractText = json.optString("AbstractText").trim()
+                        val lines = mutableListOf<String>()
+                        if (answer.isNotBlank()) lines.add("- Risposta rapida: $answer")
+                        if (abstractText.isNotBlank()) lines.add("- ${abstractText.take(320)}")
+                        if (lines.isNotEmpty()) {
+                            sections.add("### Risposta Diretta\n" + lines.joinToString("\n"))
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. Google News RSS — ONLY when user asks for recent news OR as last-resort fallback;
+        // NEVER include 250-char base64 Google News redirect URLs that bloat token usage.
+        val lowerQ = cleanQuery.lowercase()
+        val wantsNews = listOf("notizie", "news", "ultime", "oggi", "novità", "novita", "aggiornamenti", "meteo", "partita", "risultato")
+            .any { lowerQ.contains(it) }
+        if (wantsNews || sections.isEmpty()) {
+            runCatching {
+                val req = Request.Builder()
+                    .url("https://news.google.com/rss/search?q=$encoded&hl=it&gl=IT&ceid=IT:it")
+                    .header("User-Agent", "Mozilla/5.0 (Linux; Android 15; Pixel 10 Pro XL) AppleWebKit/537.36")
                     .header("Accept-Language", "it-IT,it;q=0.9,en;q=0.8")
                     .build()
                 httpClient.newCall(req).execute().use { resp ->
                     if (resp.isSuccessful) {
-                        val html = resp.body?.string().orEmpty()
-                        val linkRegex = Regex("""class=['"]result-link['"][^>]*href=['"]([^'"]+)['"][^>]*>(.*?)</a>""", RegexOption.DOT_MATCHES_ALL)
-                        val snippetRegex = Regex("""class=['"]result-snippet['"][^>]*>(.*?)</td>""", RegexOption.DOT_MATCHES_ALL)
-                        val links = linkRegex.findAll(html).take(5).toList()
-                        val snippets = snippetRegex.findAll(html).map { stripHtml(it.groupValues[1]) }.take(5).toList()
-                        val ddgLines = links.mapIndexed { idx, m ->
-                            val url = m.groupValues[1]
-                            val title = stripHtml(m.groupValues[2])
-                            val snip = snippets.getOrNull(idx).orEmpty()
-                            "- $title: ${snip.take(180)} ($url)"
-                        }
-                        if (ddgLines.isNotEmpty()) {
-                            sections.add("### Risultati Web\n" + ddgLines.joinToString("\n"))
+                        val xml = resp.body?.string().orEmpty()
+                        val itemRegex = Regex("<item>(.*?)</item>", RegexOption.DOT_MATCHES_ALL)
+                        val titleRegex = Regex("<title>(.*?)</title>", RegexOption.DOT_MATCHES_ALL)
+                        val pubDateRegex = Regex("<pubDate>(.*?)</pubDate>", RegexOption.DOT_MATCHES_ALL)
+                        val newsLines = itemRegex.findAll(xml).take(3).mapNotNull { m ->
+                            val block = m.groupValues[1]
+                            val title = stripHtml(
+                                titleRegex.find(block)?.groupValues?.get(1).orEmpty()
+                                    .removePrefix("<![CDATA[").removeSuffix("]]>")
+                            )
+                            val date = stripHtml(pubDateRegex.find(block)?.groupValues?.get(1).orEmpty())
+                                .substringBeforeLast(" GMT").take(17)
+                            if (title.isBlank()) null
+                            else "- $title" + if (date.isNotBlank()) " [$date]" else ""
+                        }.toList()
+                        if (newsLines.isNotEmpty()) {
+                            sections.add("### Notizie Recenti\n" + newsLines.joinToString("\n"))
                         }
                     }
                 }
@@ -504,13 +590,12 @@ class AndroidSystemActions(private val context: Context) {
         }
 
         if (sections.isEmpty()) {
-            "Nessun risultato web trovato per '$cleanQuery'. Verifica che il Pixel sia connesso a Internet."
+            "Nessun risultato web trovato per '$cleanQuery'. Verifica la connessione Internet del dispositivo."
         } else {
             buildString {
-                appendLine("Risultati ricerca Internet per \"$cleanQuery\":")
-                appendLine()
+                appendLine("Risultati per \"$cleanQuery\":")
                 append(sections.joinToString("\n\n"))
-            }.take(2400).trimEnd()
+            }.take(1350).trimEnd()
         }
     }
 
