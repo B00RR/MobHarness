@@ -1,19 +1,16 @@
-<?xml version="1.0" encoding="utf-8"?><!--
-   Sample data extraction rules file; uncomment and customize as necessary.
-   See https://developer.android.com/about/versions/12/backup-restore#xml-changes
-   for details.
--->
+<?xml version="1.0" encoding="utf-8"?>
 <data-extraction-rules>
     <cloud-backup>
-        <!-- TODO: Use <include> and <exclude> to control what is backed up.
-        <include .../>
-        <exclude .../>
-        -->
+        <!-- Exclude all private user data and chat history from leaving the device to remote cloud backups -->
+        <exclude domain="database" path="." />
+        <exclude domain="file" path="mobharn_vault" />
+        <exclude domain="file" path="workspace" />
+        <!-- Exclude large replaceable LiteRT model weights -->
+        <exclude domain="file" path="litertlm_models" />
     </cloud-backup>
-    <!--
     <device-transfer>
-        <include .../>
-        <exclude .../>
+        <!-- Direct phone-to-phone migration preserves user databases, vault notes, and workspaces,
+             but excludes large replaceable model weights to conserve bandwidth and storage -->
+        <exclude domain="file" path="litertlm_models" />
     </device-transfer>
-    -->
 </data-extraction-rules>

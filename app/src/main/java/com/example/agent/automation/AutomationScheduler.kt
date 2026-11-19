@@ -1,6 +1,7 @@
 package com.example.agent.automation
 
 import android.content.Context
+import androidx.work.BackoffPolicy
 import androidx.work.Constraints
 import androidx.work.Data
 import androidx.work.ExistingPeriodicWorkPolicy
@@ -23,6 +24,7 @@ class AutomationScheduler(context: Context) {
         }
         val input = Data.Builder()
             .putLong(AutomationWorker.KEY_TASK_ID, task.id)
+            .putBoolean(AutomationWorker.KEY_IS_PERIODIC, task.isPeriodic)
             .build()
 
         // Battery-friendly OS constraints: never drain low battery, and only wake radio for web tasks when connected
@@ -57,6 +59,11 @@ class AutomationScheduler(context: Context) {
             val request = OneTimeWorkRequestBuilder<AutomationWorker>()
                 .setConstraints(constraints)
                 .setInitialDelay(delayMin, TimeUnit.MINUTES)
+                .setBackoffCriteria(
+                    BackoffPolicy.EXPONENTIAL,
+                    10L,
+                    TimeUnit.MINUTES
+                )
                 .setInputData(input)
                 .addTag(task.workTag)
                 .build()
@@ -72,6 +79,7 @@ class AutomationScheduler(context: Context) {
         val input = Data.Builder()
             .putLong(AutomationWorker.KEY_TASK_ID, task.id)
             .putBoolean(AutomationWorker.KEY_MANUAL_RUN, true)
+            .putBoolean(AutomationWorker.KEY_IS_PERIODIC, task.isPeriodic)
             .build()
         val request = OneTimeWorkRequestBuilder<AutomationWorker>()
             .setInputData(input)

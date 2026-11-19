@@ -223,16 +223,19 @@ class PhoneUseToolSet(
     fun type_screen_text(
         @ToolParam(description = "Suggerimento/etichetta del campo (o vuoto per campo attivo)") fieldHint: String = "",
         @ToolParam(description = "Testo da inserire") text: String
-    ): String = monitor.executeTracked(
-        toolName = "type_screen_text",
-        category = ToolGroup.PHONE_USE.id,
-        argsSummary = "type \"${text.take(40)}\" in '$fieldHint'",
-        isExternalOrMutating = true,
-        approvalDescription = "Scrivere '${text.take(60)}' nel campo sullo schermo?"
-    ) {
-        val svc = requireService()
-            ?: return@executeTracked "Servizio Accessibilità non attivo."
-        svc.typeText(fieldHint, text)
+    ): String {
+        val targetField = if (fieldHint.isNotBlank()) "'$fieldHint'" else "campo attivo"
+        return monitor.executeTracked(
+            toolName = "type_screen_text",
+            category = ToolGroup.PHONE_USE.id,
+            argsSummary = if (fieldHint.isNotBlank()) "type in '$fieldHint'" else "type in active field",
+            isExternalOrMutating = true,
+            approvalDescription = "Scrivere '${text.take(60)}' nel $targetField sullo schermo?"
+        ) {
+            val svc = requireService()
+                ?: return@executeTracked "Servizio Accessibilità non attivo."
+            svc.typeText(fieldHint, text)
+        }
     }
 
     @Tool(description = "Scorre lo schermo in una direzione: 'down', 'up', 'left' o 'right'")

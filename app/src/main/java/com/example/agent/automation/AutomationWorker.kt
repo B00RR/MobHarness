@@ -34,17 +34,23 @@ class AutomationWorker(
         val taskId = inputData.getLong(KEY_TASK_ID, -1L)
         if (taskId <= 0L) return@withContext Result.failure()
 
+        val db = MobHarnDatabase.getInstance(applicationContext)
+        val task = db.automationDao().getTaskById(taskId) ?: return@withContext Result.success()
+
         val isManual = inputData.getBoolean(KEY_MANUAL_RUN, false)
         val snap = runCatching { ThermalAndMemoryGuard.readSnapshot(applicationContext) }.getOrNull()
         if (!isManual && snap != null) {
-            if (snap.isPowerSaveMode) return@withContext Result.success()
+            val powerSaveResult = evaluatePowerSaveAction(
+                isManual = isManual,
+                isPowerSaveMode = snap.isPowerSaveMode,
+                isPeriodic = task.isPeriodic
+            )
+            if (powerSaveResult != null) return@withContext powerSaveResult
+
             if (snap.thermalLevel == ThermalLevel.HOT || snap.thermalLevel == ThermalLevel.CRITICAL || snap.isLowMemory) {
                 return@withContext Result.retry()
             }
         }
-
-        val db = MobHarnDatabase.getInstance(applicationContext)
-        val task = db.automationDao().getTaskById(taskId) ?: return@withContext Result.success()
         val system = AndroidSystemActions(applicationContext)
         val vault = MarkdownVaultManager(applicationContext)
         val workspace = WorkspaceManager(applicationContext)
@@ -129,6 +135,22 @@ class AutomationWorker(
     companion object {
         const val KEY_TASK_ID = "automation_task_id"
         const val KEY_MANUAL_RUN = "automation_manual_run"
+        const val KEY_IS_PERIODIC = "automation_is_periodic"
         private const val CHANNEL_ID = "mobharn_automations"
+
+        internal fun evaluatePowerSaveAction(
+            isManual: Boolean,
+            isPowerSaveMode: Boolean,
+            isPeriodic: Boolean
+        ): Result? {
+            if (!isManual && isPowerSaveMode) {
+                return if (isPeriodic) {
+                    Result.success()
+                } else {
+                    Result.retry()
+                }
+            }
+            return null
+        }
     }
 }
