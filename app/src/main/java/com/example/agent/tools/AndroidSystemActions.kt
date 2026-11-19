@@ -25,6 +25,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import com.example.agent.ThermalAndMemoryGuard
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.ConnectionPool
@@ -430,7 +431,7 @@ class AndroidSystemActions(private val context: Context) {
 
         // Run Wikipedia and DuckDuckGo Web Search in parallel to halve tool latency
         val (wikiSection, webSection) = kotlinx.coroutines.coroutineScope {
-            val wikiJob = kotlinx.coroutines.async {
+            val wikiJob = async {
                 runCatching {
                     val coreEntity = WebSearchParser.extractCoreEntity(cleanQuery)
                     val wikiHits = buildList {
@@ -450,7 +451,7 @@ class AndroidSystemActions(private val context: Context) {
                 }.getOrNull()
             }
 
-            val ddgJob = kotlinx.coroutines.async {
+            val ddgJob = async {
                 runCatching {
                     val formBody = okhttp3.FormBody.Builder()
                         .add("q", cleanQuery)
