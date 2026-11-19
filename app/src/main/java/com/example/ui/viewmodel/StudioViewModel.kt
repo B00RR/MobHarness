@@ -4,7 +4,7 @@ import android.content.Context
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.example.agent.phoneuse.HermesAccessibilityService
+import com.example.agent.phoneuse.MobHarnAccessibilityService
 import com.example.agent.tools.SelfEvolveToolSet
 import com.example.data.db.AutomationTaskEntity
 import com.example.data.db.CustomToolEntity
@@ -12,7 +12,7 @@ import com.example.data.db.ToolExecutionLogEntity
 import com.example.data.db.WorkspaceSnapshotEntity
 import com.example.data.prefs.AppPreferences
 import com.example.data.workspace.WorkspaceFileInfo
-import com.example.di.HermesAppContainer
+import com.example.di.MobHarnAppContainer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -22,7 +22,9 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -51,7 +53,7 @@ data class StudioUiState(
 @OptIn(ExperimentalCoroutinesApi::class)
 class StudioViewModel(
     private val appContext: Context,
-    private val container: HermesAppContainer
+    private val container: MobHarnAppContainer
 ) : ViewModel() {
 
     private val repo = container.repository
@@ -76,15 +78,14 @@ class StudioViewModel(
     val customTools: StateFlow<List<CustomToolEntity>> = repo.customToolsFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    val accessibilityConnected: StateFlow<Boolean> = HermesAccessibilityService.isConnected
+    val accessibilityConnected: StateFlow<Boolean> = MobHarnAccessibilityService.isConnected
 
+    // Only re-query Room snapshots when activeProject changes — never on editor keystrokes
     val snapshots: StateFlow<List<WorkspaceSnapshotEntity>> = _uiState
-        .flatMapLatest { repo.observeSnapshots(it.activeProject) }
+        .map { it.activeProject }
+        .distinctUntilChanged()
+        .flatMapLatest { repo.observeSnapshots(it) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
-
-    init {
-        refreshWorkspace()
-    }
 
     fun refreshWorkspace() {
         viewModelScope.launch {
@@ -166,10 +167,10 @@ class StudioViewModel(
         viewModelScope.launch {
             val project = _uiState.value.activeProject
             val starter = when {
-                relativePath.endsWith(".js", true) -> "// $relativePath\nconsole.log('Ciao da Hermes Edge!');\n"
+                relativePath.endsWith(".js", true) -> "// $relativePath\nconsole.log('Ciao da MobHarn!');\n"
                 relativePath.endsWith(".html", true) -> "<!DOCTYPE html>\n<html><body style='background:#0e1412;color:#dfe4e0;font-family:sans-serif;padding:20px'><h2>$relativePath</h2></body></html>"
-                relativePath.endsWith(".sql", true) -> "-- $relativePath\nSELECT 'Hermes SQLite pronto' AS status;\n"
-                relativePath.endsWith(".kt", true) -> "fun main() {\n    println(\"Hermes Edge Kotlin\")\n}\n"
+                relativePath.endsWith(".sql", true) -> "-- $relativePath\nSELECT 'MobHarn SQLite pronto' AS status;\n"
+                relativePath.endsWith(".kt", true) -> "fun main() {\n    println(\"MobHarn Kotlin\")\n}\n"
                 else -> ""
             }
             workspace.writeFile(project, relativePath, starter).onSuccess {
@@ -381,7 +382,7 @@ class StudioViewModel(
                             else list.joinToString("\n") { "[${it.category}] ${it.keyName}: ${it.content}" }
                         }
                         "screen" -> {
-                            val svc = HermesAccessibilityService.instance
+                            val svc = MobHarnAccessibilityService.instance
                             svc?.captureScreenTree(60)
                                 ?: "Servizio Accessibilità non ancora attivo. Tocca 'Apri Accessibilità' qui sopra per abilitarlo."
                         }
@@ -419,7 +420,7 @@ class StudioViewModel(
     ) {
         if (name.isBlank()) return
         viewModelScope.launch {
-            val tag = "hermes_auto_${System.currentTimeMillis()}"
+            val tag = "mobharn_auto_${System.currentTimeMillis()}"
             val entity = AutomationTaskEntity(
                 name = name.trim(),
                 prompt = prompt.trim().ifBlank { "Esecuzione automatica $actionType" },

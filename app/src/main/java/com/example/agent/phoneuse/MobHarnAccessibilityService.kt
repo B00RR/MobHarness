@@ -18,7 +18,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withTimeoutOrNull
 
-class HermesAccessibilityService : AccessibilityService() {
+class MobHarnAccessibilityService : AccessibilityService() {
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -278,7 +278,7 @@ class HermesAccessibilityService : AccessibilityService() {
 
     companion object {
         @Volatile
-        var instance: HermesAccessibilityService? = null
+        var instance: MobHarnAccessibilityService? = null
             private set
 
         private val _isConnected = MutableStateFlow(false)

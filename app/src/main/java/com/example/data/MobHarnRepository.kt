@@ -8,7 +8,7 @@ import com.example.data.db.AutomationTaskEntity
 import com.example.data.db.ChatMessageEntity
 import com.example.data.db.ChatSessionEntity
 import com.example.data.db.CustomToolEntity
-import com.example.data.db.HermesDatabase
+import com.example.data.db.MobHarnDatabase
 import com.example.data.db.MemoryEntryEntity
 import com.example.data.db.ModelProfileEntity
 import com.example.data.db.ToolExecutionLogEntity
@@ -25,9 +25,9 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
 
-class HermesRepository(
+class MobHarnRepository(
     private val context: Context,
-    private val db: HermesDatabase,
+    private val db: MobHarnDatabase,
     val vault: MarkdownVaultManager,
     val workspace: WorkspaceManager,
     val prefs: PreferencesRepository
@@ -96,7 +96,7 @@ class HermesRepository(
         if (sessions.isEmpty()) {
             db.chatDao().insertSession(
                 ChatSessionEntity(
-                    title = "Sessione Hermes #1",
+                    title = "Sessione #1",
                     activeProject = "starter_web"
                 )
             )
@@ -264,6 +264,7 @@ class HermesRepository(
                 success = success
             )
         )
+        db.toolLogDao().pruneOldLogs()
     }
 
     suspend fun clearToolLogs() = db.toolLogDao().clearLogs()
@@ -349,7 +350,7 @@ class HermesRepository(
 
             resolver.openInputStream(uri)?.use { input ->
                 FileOutputStream(destFile).use { output ->
-                    val buffer = ByteArray(1024 * 1024) // 1 MB chunk for fast copy of multi-GB Gemma 4
+                    val buffer = ByteArray(256 * 1024) // 256 KB chunk: fast UFS copy with 4x lower peak heap
                     var copied = 0L
                     var read: Int
                     while (input.read(buffer).also { read = it } != -1) {
@@ -375,23 +376,20 @@ class HermesRepository(
                 .removeSuffix(".task")
                 .replace('_', ' ')
                 .replace('-', ' ')
-            val visionLikely = displayName.contains("e2b", ignoreCase = true) ||
-                displayName.contains("e4b", ignoreCase = true) ||
-                displayName.contains("gemma-4", ignoreCase = true) ||
-                displayName.contains("gemma4", ignoreCase = true) ||
-                displayName.contains("vision", ignoreCase = true)
 
             val npuLikely = displayName.contains("tensor", ignoreCase = true) ||
                 displayName.contains("_g5", ignoreCase = true) ||
                 displayName.contains("npu", ignoreCase = true)
 
+            // Lean & cool defaults: text-only (saves ~500MB VRAM until user toggles Vision),
+            // 6K context (fits dynamic tools with low KV-cache RAM), and Chain of Thought enabled with eco budget.
             val profile = ModelProfileEntity(
                 displayName = cleanTitle,
                 filePath = destFile.absolutePath,
                 fileSizeBytes = finalSize,
-                supportsVision = visionLikely,
+                supportsVision = false,
                 preferredBackend = if (npuLikely) "NPU" else "GPU",
-                maxNumTokens = 4096,
+                maxNumTokens = 6144,
                 temperature = 0.7f,
                 topK = 64,
                 topP = 0.95f,
@@ -433,7 +431,7 @@ class HermesRepository(
             ),
             AgentSkillEntity(
                 slug = "memory_curator",
-                title = "Curatore Memoria Hermes",
+                title = "Curatore Memoria Locale",
                 description = "Estrae e consolida fatti duraturi in USER.md e MEMORY.md senza duplicati",
                 instructionsMd = """
                     # Skill: Memory Curator

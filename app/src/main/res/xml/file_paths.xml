@@ -2,5 +2,5 @@
 <paths>
     <cache-path name="camera_images" path="camera/" />
     <files-path name="workspace_files" path="workspace/" />
-    <files-path name="hermes_vault" path="hermes_vault/" />
+    <files-path name="mobharn_vault" path="mobharn_vault/" />
 </paths>

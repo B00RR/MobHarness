@@ -20,7 +20,7 @@ data class VaultDocuments(
 
 class MarkdownVaultManager(context: Context) {
 
-    private val vaultDir: File = File(context.filesDir, "hermes_vault").apply { mkdirs() }
+    private val vaultDir: File = File(context.filesDir, "mobharn_vault").apply { mkdirs() }
     private val skillsDir: File = File(vaultDir, "skills").apply { mkdirs() }
 
     private val soulFile = File(vaultDir, "SOUL.md")
@@ -67,7 +67,7 @@ class MarkdownVaultManager(context: Context) {
         val userBuilder = StringBuilder().apply {
             appendLine("# USER.md — Profilo & Preferenze Utente")
             appendLine()
-            appendLine("_Aggiornato automaticamente da Hermes Edge (${dateFmt.format(Date())})_")
+            appendLine("_Aggiornato automaticamente da MobHarn (${dateFmt.format(Date())})_")
             appendLine()
             if (userEntries.isEmpty()) {
                 appendLine("- Nessun fatto utente registrato ancora. L'agente memorizzerà preferenze e contesto automaticamente.")
@@ -85,7 +85,7 @@ class MarkdownVaultManager(context: Context) {
         val memBuilder = StringBuilder().apply {
             appendLine("# MEMORY.md — Memoria Persistente & Convenzioni")
             appendLine()
-            appendLine("_Aggiornato automaticamente da Hermes Edge (${dateFmt.format(Date())})_")
+            appendLine("_Aggiornato automaticamente da MobHarn (${dateFmt.format(Date())})_")
             appendLine()
             if (globalEntries.isEmpty()) {
                 appendLine("- Nessuna memoria globale ancora salvata.")
@@ -126,7 +126,7 @@ class MarkdownVaultManager(context: Context) {
     ) = withContext(Dispatchers.IO) {
         val docs = readVault()
         val bundle = buildString {
-            appendLine("# Hermes Edge — Export Completo Memoria & Skill")
+            appendLine("# MobHarn — Export Completo Memoria & Skill")
             appendLine("_Generato il ${SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date())}_")
             appendLine()
             appendLine("---")
@@ -153,16 +153,14 @@ class MarkdownVaultManager(context: Context) {
 
     companion object {
         val DEFAULT_SOUL_MD = """
-            # SOUL.md — Identità di Hermes Edge
+            # SOUL.md — Identità di MobHarn
 
-            Sei **Hermes Edge**, un agente AI autonomo e coding partner in esecuzione 100% locale su Pixel tramite Gemma 4 (LiteRT-LM).
+            Sei **MobHarn**, un agente AI autonomo e coding partner su Android (Gemma 4 LiteRT-LM) dotato di strumenti reali (ricerca Internet, coding sandbox, memoria persistente e azioni di sistema).
 
             ## Principi Operativi
-            1. **Memoria attiva**: Quando l'utente condivide preferenze durature, obiettivi, convenzioni di codice o fatti importanti, salvali subito con `save_memory`. Prima di rispondere a domande sul passato, usa `search_memory` o `search_past_sessions`.
-            2. **Orientato all'azione**: Usa i tuoi strumenti Android, di ricerca web, di telemetria e del Coding Workspace invece di indovinare.
-            3. **Ciclo di Coding Rigoroso**: Quando scrivi o modifichi codice nel workspace, leggi prima i file (`read_file_lines`), applica patch precise (`patch_workspace_file` / `write_workspace_file`), e verifica la logica JavaScript o SQL nella sandbox (`run_js_sandbox` / `run_sql_sandbox`). Se vedi un errore, correggilo prima di concludere.
-            4. **Skill Procedurali**: Carica una skill con `load_skill` quando il task corrisponde alla sua descrizione, e salva nuove procedure ricorrenti con `save_skill`.
-            5. **Stile**: Rispondi nella lingua dell'utente (italiano di default), in modo diretto, tecnico quando serve, conciso e trasparente sui tool usati.
+            1. **Usa sempre i tool reali**: per ricerche su Internet o notizie chiama `web_search` / `fetch_webpage`; per calcoli usa `calculate_expression`; per batteria/sensori usa `get_device_telemetry`; per codice usa il workspace e la sandbox JS/SQL. Non dire mai che non hai accesso a Internet o ai dati reali quando hai lo strumento attivo.
+            2. **Memoria attiva**: salva preferenze e fatti importanti con `save_memory` e cerca il passato con `search_memory` / `search_past_sessions`.
+            3. **Stile**: rispondi in italiano, chiaro, sintetico e trasparente sui risultati dei tool.
         """.trimIndent()
 
         val DEFAULT_USER_MD = """
@@ -174,7 +172,7 @@ class MarkdownVaultManager(context: Context) {
         val DEFAULT_MEMORY_MD = """
             # MEMORY.md — Memoria Persistente & Convenzioni
 
-            - Ambiente configurato: Hermes Edge offline vault + Coding Workspace sandboxed.
+            - Ambiente configurato: MobHarn vault locale + Coding Workspace sandboxed.
         """.trimIndent()
     }
 }

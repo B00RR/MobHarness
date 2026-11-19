@@ -1,4 +1,4 @@
-name: Build & Release Hermes Edge APK
+name: Build & Release MobHarn APK
 
 on:
   push:
@@ -53,27 +53,27 @@ jobs:
 
       - name: Prepare APK asset
         run: |
-          cp app/build/outputs/apk/debug/app-debug.apk HermesEdge-latest.apk
-          ls -lh HermesEdge-latest.apk
+          cp app/build/outputs/apk/debug/app-debug.apk MobHarn-latest.apk
+          ls -lh MobHarn-latest.apk
 
       - name: Upload Build Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: HermesEdge-APK
-          path: HermesEdge-latest.apk
+          name: MobHarn-APK
+          path: MobHarn-latest.apk
           retention-days: 30
 
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          NOTES="Build automatica di **Hermes Edge** (Gemma 4 LiteRT-LM + Memoria Hermes + Coding Studio + Controllo Schermo Pixel).\n\nCommit: \`${GITHUB_SHA::7}\`\n\n### Installazione sul Pixel\n1. Tocca **HermesEdge-latest.apk** qui sotto per scaricarlo.\n2. Apri il file scaricato e consenti l'installazione da origini sconosciute.\n3. In **Modello**, importa il tuo file \`.litertlm\` di Gemma 4."
+          NOTES="Build automatica di **MobHarn** (Gemma 4 LiteRT-LM + Memoria Markdown locale + Coding Studio + Controllo Schermo + Eco Termico).\n\nCommit: \`${GITHUB_SHA::7}\`\n\n### Installazione sul Pixel\n1. Tocca **MobHarn-latest.apk** qui sotto per scaricarlo.\n2. Apri il file scaricato e consenti l'installazione da origini sconosciute.\n3. In **Modello**, importa il tuo file \`.litertlm\` di Gemma 4."
           if gh release view latest >/dev/null 2>&1; then
-            gh release upload latest HermesEdge-latest.apk --clobber
-            gh release edit latest --title "Hermes Edge — Ultima Build Android" --notes "$(printf '%b' "$NOTES")"
+            gh release upload latest MobHarn-latest.apk --clobber
+            gh release edit latest --title "MobHarn — Ultima Build Android" --notes "$(printf '%b' "$NOTES")"
           else
-            gh release create latest HermesEdge-latest.apk \
-              --title "Hermes Edge — Ultima Build Android" \
+            gh release create latest MobHarn-latest.apk \
+              --title "MobHarn — Ultima Build Android" \
               --notes "$(printf '%b' "$NOTES")" \
               --latest
           fi

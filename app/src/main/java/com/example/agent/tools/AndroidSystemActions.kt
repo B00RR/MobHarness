@@ -23,9 +23,11 @@ import android.provider.AlarmClock
 import android.provider.CalendarContract
 import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
+import com.example.agent.ThermalAndMemoryGuard
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import okhttp3.ConnectionPool
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.net.URLEncoder
@@ -43,16 +45,32 @@ data class DeviceHardwareSummary(
     val batteryPercent: Int,
     val isCharging: Boolean,
     val batteryTempC: Float,
-    val networkStatus: String
+    val networkStatus: String,
+    val thermalLabel: String = "Fresco",
+    val appHeapMb: Int = 0,
+    val nativeHeapMb: Int = 0
 )
 
 class AndroidSystemActions(private val context: Context) {
 
-    private val httpClient: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
-        .followRedirects(true)
-        .build()
+    private var httpClientInitialized = false
+
+    // Lazy compact HTTP client: allocates zero threads/sockets until web_search or fetch_webpage is actually used
+    private val httpClient: OkHttpClient by lazy {
+        httpClientInitialized = true
+        OkHttpClient.Builder()
+            .connectionPool(ConnectionPool(2, 20, TimeUnit.SECONDS))
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(15, TimeUnit.SECONDS)
+            .followRedirects(true)
+            .build()
+    }
+
+    fun evictIdleConnections() {
+        if (httpClientInitialized) {
+            runCatching { httpClient.connectionPool.evictAll() }
+        }
+    }
 
     fun getHardwareSummary(): DeviceHardwareSummary {
         val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
@@ -81,6 +99,8 @@ class AndroidSystemActions(private val context: Context) {
             else -> "Connesso"
         }
 
+        val thermalSnap = ThermalAndMemoryGuard.readSnapshot(context)
+
         return DeviceHardwareSummary(
             modelName = "${Build.MANUFACTURER.replaceFirstChar { it.uppercase() }} ${Build.MODEL}",
             androidVersion = "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",
@@ -91,7 +111,10 @@ class AndroidSystemActions(private val context: Context) {
             batteryPercent = pct,
             isCharging = charging,
             batteryTempC = tempTenths / 10f,
-            networkStatus = netStatus
+            networkStatus = netStatus,
+            thermalLabel = thermalSnap.thermalLevel.labelIt,
+            appHeapMb = thermalSnap.appHeapMb,
+            nativeHeapMb = thermalSnap.nativeHeapMb
         )
     }
 
@@ -141,14 +164,22 @@ class AndroidSystemActions(private val context: Context) {
         }
 
         val registered = mutableListOf<Sensor>()
-        targetTypes.forEach { (type, _) ->
-            sm.getDefaultSensor(type)?.let { sensor ->
-                sm.registerListener(listener, sensor, SensorManager.SENSOR_DELAY_UI)
-                registered.add(sensor)
+        try {
+            targetTypes.forEach { (type, _) ->
+                sm.getDefaultSensor(type)?.let { sensor ->
+                    sm.registerListener(listener, sensor, SensorManager.SENSOR_DELAY_NORMAL)
+                    registered.add(sensor)
+                }
             }
+            // Exit as soon as all registered sensors emit 1 reading (max 350ms) to minimize sensor power draw
+            var waitedMs = 0L
+            while (waitedMs < 350L && readings.size < registered.size) {
+                delay(50L)
+                waitedMs += 50L
+            }
+        } finally {
+            sm.unregisterListener(listener)
         }
-        delay(450)
-        sm.unregisterListener(listener)
 
         if (readings.isEmpty()) {
             "Sensori rilevati: ${registered.size}, nessun campione immediato disponibile."
@@ -186,7 +217,7 @@ class AndroidSystemActions(private val context: Context) {
         val intent = Intent(AlarmClock.ACTION_SET_ALARM).apply {
             putExtra(AlarmClock.EXTRA_HOUR, h)
             putExtra(AlarmClock.EXTRA_MINUTES, m)
-            putExtra(AlarmClock.EXTRA_MESSAGE, message.ifBlank { "Promemoria Hermes Edge" })
+            putExtra(AlarmClock.EXTRA_MESSAGE, message.ifBlank { "Promemoria MobHarn" })
             putExtra(AlarmClock.EXTRA_SKIP_UI, false)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
@@ -203,7 +234,7 @@ class AndroidSystemActions(private val context: Context) {
         val endMs = startMs + durationMinutes.coerceAtLeast(15) * 60_000L
         val intent = Intent(Intent.ACTION_INSERT).apply {
             data = CalendarContract.Events.CONTENT_URI
-            putExtra(CalendarContract.Events.TITLE, title.ifBlank { "Evento Hermes Edge" })
+            putExtra(CalendarContract.Events.TITLE, title.ifBlank { "Evento MobHarn" })
             putExtra(CalendarContract.Events.DESCRIPTION, description)
             putExtra(CalendarContract.EXTRA_EVENT_BEGIN_TIME, startMs)
             putExtra(CalendarContract.EXTRA_EVENT_END_TIME, endMs)
@@ -229,28 +260,59 @@ class AndroidSystemActions(private val context: Context) {
     }
 
     fun launchApp(appNameQuery: String): String {
+        val rawQuery = appNameQuery.trim().lowercase()
+        if (rawQuery.isBlank()) return "Specifica il nome dell'app da aprire."
+
+        val aliases = mapOf(
+            "fotocamera" to listOf("fotocamera", "camera"),
+            "camera" to listOf("camera", "fotocamera"),
+            "impostazioni" to listOf("impostazioni", "settings"),
+            "orologio" to listOf("orologio", "clock", "deskclock"),
+            "calendario" to listOf("calendario", "calendar"),
+            "messaggi" to listOf("messaggi", "messages", "messaging"),
+            "telefono" to listOf("telefono", "phone", "dialer"),
+            "calcolatrice" to listOf("calcolatrice", "calculator"),
+            "galleria" to listOf("foto", "photos", "galleria", "gallery"),
+            "mappe" to listOf("maps", "mappe"),
+            "rubrica" to listOf("contatti", "contacts"),
+            "posta" to listOf("gmail", "mail", "email"),
+            "browser" to listOf("chrome", "browser")
+        )
+        val searchTerms = aliases[rawQuery] ?: listOf(rawQuery)
+
         val pm = context.packageManager
         val mainIntent = Intent(Intent.ACTION_MAIN, null).apply {
             addCategory(Intent.CATEGORY_LAUNCHER)
         }
         val apps = pm.queryIntentActivities(mainIntent, 0)
-        val match = apps.firstOrNull { info ->
-            val label = info.loadLabel(pm).toString()
-            label.contains(appNameQuery.trim(), ignoreCase = true) ||
-                info.activityInfo.packageName.contains(appNameQuery.trim(), ignoreCase = true)
-        } ?: return "Nessuna app installata trovata per '$appNameQuery'."
+        val scored = apps.mapNotNull { info ->
+            val label = info.loadLabel(pm).toString().lowercase()
+            val pkg = info.activityInfo.packageName.lowercase()
+            val score = searchTerms.maxOf { term ->
+                when {
+                    label == term -> 100
+                    label.startsWith(term) -> 80
+                    label.contains(term) -> 60
+                    pkg.endsWith(".$term") -> 50
+                    pkg.contains(term) -> 30
+                    else -> 0
+                }
+            }
+            if (score > 0) info to score else null
+        }.maxByOrNull { it.second }?.first
+            ?: return "Nessuna app installata trovata per '$appNameQuery'."
 
-        val launch = pm.getLaunchIntentForPackage(match.activityInfo.packageName)?.apply {
+        val launch = pm.getLaunchIntentForPackage(scored.activityInfo.packageName)?.apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        } ?: return "Impossibile avviare ${match.loadLabel(pm)}."
+        } ?: return "Impossibile avviare ${scored.loadLabel(pm)}."
 
-        return launchIntentSafely(launch, "App avviata: ${match.loadLabel(pm)} (${match.activityInfo.packageName})")
+        return launchIntentSafely(launch, "App avviata: ${scored.loadLabel(pm)} (${scored.activityInfo.packageName})")
     }
 
     fun setTimer(seconds: Int, message: String): String {
         val intent = Intent(AlarmClock.ACTION_SET_TIMER).apply {
             putExtra(AlarmClock.EXTRA_LENGTH, seconds.coerceIn(1, 86400))
-            putExtra(AlarmClock.EXTRA_MESSAGE, message.ifBlank { "Timer Hermes Edge" })
+            putExtra(AlarmClock.EXTRA_MESSAGE, message.ifBlank { "Timer MobHarn" })
             putExtra(AlarmClock.EXTRA_SKIP_UI, false)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
@@ -281,7 +343,7 @@ class AndroidSystemActions(private val context: Context) {
         return launchIntentSafely(intent, "Tastierino aperto con $phoneNumber")
     }
 
-    fun shareText(text: String, title: String = "Condividi da Hermes Edge"): String {
+    fun shareText(text: String, title: String = "Condividi da MobHarn"): String {
         val send = Intent(Intent.ACTION_SEND).apply {
             type = "text/plain"
             putExtra(Intent.EXTRA_TEXT, text)
@@ -306,38 +368,149 @@ class AndroidSystemActions(private val context: Context) {
     }
 
     suspend fun webSearch(query: String): String = withContext(Dispatchers.IO) {
-        if (query.isBlank()) return@withContext "Query di ricerca vuota."
+        val cleanQuery = query.trim()
+        if (cleanQuery.isBlank()) return@withContext "Query di ricerca vuota."
+
+        val encoded = URLEncoder.encode(cleanQuery, "UTF-8")
+        val sections = mutableListOf<String>()
+
+        // 1. DuckDuckGo Instant Answer JSON API (fast factual answers, zero CAPTCHA)
         runCatching {
-            val encoded = URLEncoder.encode(query.trim(), "UTF-8")
-            val request = Request.Builder()
-                .url("https://html.duckduckgo.com/html/?q=$encoded")
-                .header("User-Agent", "Mozilla/5.0 (Linux; Android 15; Pixel) AppleWebKit/537.36")
+            val req = Request.Builder()
+                .url("https://api.duckduckgo.com/?q=$encoded&format=json&no_html=1&skip_disambig=1")
+                .header("User-Agent", "MobHarn/1.0 (Android)")
                 .build()
-            httpClient.newCall(request).execute().use { resp ->
-                if (!resp.isSuccessful) {
-                    return@use "Ricerca web fallita (HTTP ${resp.code})."
-                }
-                val html = resp.body?.string().orEmpty()
-                val titleRegex = Regex("""class="result__a"[^>]*>(.*?)</a>""", RegexOption.DOT_MATCHES_ALL)
-                val snippetRegex = Regex("""class="result__snippet"[^>]*>(.*?)</a>""", RegexOption.DOT_MATCHES_ALL)
-                val titles = titleRegex.findAll(html).map { stripHtml(it.groupValues[1]) }.take(5).toList()
-                val snippets = snippetRegex.findAll(html).map { stripHtml(it.groupValues[1]) }.take(5).toList()
-                if (titles.isEmpty()) {
-                    "Nessun risultato web estratto per '$query'."
-                } else {
-                    buildString {
-                        appendLine("Risultati web per \"$query\":")
-                        titles.forEachIndexed { idx, t ->
-                            appendLine("${idx + 1}. $t")
-                            snippets.getOrNull(idx)?.takeIf { it.isNotBlank() }?.let { s ->
-                                appendLine("   $s")
+            httpClient.newCall(req).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    val body = resp.body?.string().orEmpty()
+                    val json = org.json.JSONObject(body)
+                    val abstractText = json.optString("AbstractText").trim()
+                    val abstractUrl = json.optString("AbstractURL").trim()
+                    val answer = json.optString("Answer").trim()
+                    val lines = mutableListOf<String>()
+                    if (answer.isNotBlank()) lines.add("- Risposta rapida: $answer")
+                    if (abstractText.isNotBlank()) {
+                        lines.add("- Sintesi: ${abstractText.take(360)}" + if (abstractUrl.isNotBlank()) " ($abstractUrl)" else "")
+                    }
+                    val related = json.optJSONArray("RelatedTopics")
+                    if (related != null && lines.isEmpty()) {
+                        for (i in 0 until minOf(related.length(), 3)) {
+                            val item = related.optJSONObject(i) ?: continue
+                            val txt = item.optString("Text").trim()
+                            val url = item.optString("FirstURL").trim()
+                            if (txt.isNotBlank()) {
+                                lines.add("- ${txt.take(200)}" + if (url.isNotBlank()) " ($url)" else "")
                             }
                         }
-                    }.trimEnd()
+                    }
+                    if (lines.isNotEmpty()) {
+                        sections.add("### Risposte Dirette\n" + lines.joinToString("\n"))
+                    }
                 }
             }
-        }.getOrElse { e ->
-            "Errore rete durante la ricerca web: ${e.message}"
+        }
+
+        // 2. Google News RSS (official XML feed, never CAPTCHA-blocked, ideal for recent news & live info)
+        runCatching {
+            val req = Request.Builder()
+                .url("https://news.google.com/rss/search?q=$encoded&hl=it&gl=IT&ceid=IT:it")
+                .header("User-Agent", "Mozilla/5.0 (Linux; Android 15; Pixel 10 Pro XL) AppleWebKit/537.36")
+                .header("Accept-Language", "it-IT,it;q=0.9,en;q=0.8")
+                .build()
+            httpClient.newCall(req).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    val xml = resp.body?.string().orEmpty()
+                    val itemRegex = Regex("<item>(.*?)</item>", RegexOption.DOT_MATCHES_ALL)
+                    val titleRegex = Regex("<title>(.*?)</title>", RegexOption.DOT_MATCHES_ALL)
+                    val pubDateRegex = Regex("<pubDate>(.*?)</pubDate>", RegexOption.DOT_MATCHES_ALL)
+                    val linkRegex = Regex("<link>(.*?)</link>", RegexOption.DOT_MATCHES_ALL)
+                    val newsLines = itemRegex.findAll(xml).take(5).mapNotNull { m ->
+                        val block = m.groupValues[1]
+                        val title = stripHtml(
+                            titleRegex.find(block)?.groupValues?.get(1).orEmpty()
+                                .removePrefix("<![CDATA[").removeSuffix("]]>")
+                        )
+                        val date = stripHtml(pubDateRegex.find(block)?.groupValues?.get(1).orEmpty())
+                            .substringBeforeLast(" GMT").take(22)
+                        val link = stripHtml(linkRegex.find(block)?.groupValues?.get(1).orEmpty())
+                        if (title.isBlank()) null
+                        else "- $title" + (if (date.isNotBlank()) " [$date]" else "") + (if (link.isNotBlank()) "\n  URL: $link" else "")
+                    }.toList()
+                    if (newsLines.isNotEmpty()) {
+                        sections.add("### Notizie & Risultati Recenti (Google News)\n" + newsLines.joinToString("\n"))
+                    }
+                }
+            }
+        }
+
+        // 3. Wikipedia Search API (IT with EN fallback — official JSON API, zero CAPTCHA)
+        runCatching {
+            fun queryWiki(lang: String): List<String> {
+                val req = Request.Builder()
+                    .url("https://$lang.wikipedia.org/w/api.php?action=query&list=search&srsearch=$encoded&utf8=&format=json&srlimit=3")
+                    .header("User-Agent", "MobHarn/1.0 (Android)")
+                    .build()
+                return httpClient.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) return@use emptyList()
+                    val json = org.json.JSONObject(resp.body?.string().orEmpty())
+                    val arr = json.optJSONObject("query")?.optJSONArray("search") ?: return@use emptyList()
+                    (0 until arr.length()).mapNotNull { idx ->
+                        val o = arr.optJSONObject(idx) ?: return@mapNotNull null
+                        val title = o.optString("title").trim()
+                        val snippet = stripHtml(o.optString("snippet"))
+                        if (title.isBlank()) null
+                        else {
+                            val pageUrl = "https://$lang.wikipedia.org/wiki/${URLEncoder.encode(title.replace(' ', '_'), "UTF-8")}"
+                            "- $title: ${snippet.take(220)} ($pageUrl)"
+                        }
+                    }
+                }
+            }
+            val wikiHits = queryWiki("it").ifEmpty { queryWiki("en") }
+            if (wikiHits.isNotEmpty()) {
+                sections.add("### Enciclopedia (Wikipedia)\n" + wikiHits.joinToString("\n"))
+            }
+        }
+
+        // 4. DuckDuckGo Lite POST fallback if still empty
+        if (sections.isEmpty()) {
+            runCatching {
+                val formBody = okhttp3.FormBody.Builder().add("q", cleanQuery).build()
+                val req = Request.Builder()
+                    .url("https://lite.duckduckgo.com/lite/")
+                    .post(formBody)
+                    .header("User-Agent", "Mozilla/5.0 (Linux; Android 15; Pixel 10 Pro XL) AppleWebKit/537.36 Chrome/134.0.0.0 Mobile Safari/537.36")
+                    .header("Accept-Language", "it-IT,it;q=0.9,en;q=0.8")
+                    .build()
+                httpClient.newCall(req).execute().use { resp ->
+                    if (resp.isSuccessful) {
+                        val html = resp.body?.string().orEmpty()
+                        val linkRegex = Regex("""class=['"]result-link['"][^>]*href=['"]([^'"]+)['"][^>]*>(.*?)</a>""", RegexOption.DOT_MATCHES_ALL)
+                        val snippetRegex = Regex("""class=['"]result-snippet['"][^>]*>(.*?)</td>""", RegexOption.DOT_MATCHES_ALL)
+                        val links = linkRegex.findAll(html).take(5).toList()
+                        val snippets = snippetRegex.findAll(html).map { stripHtml(it.groupValues[1]) }.take(5).toList()
+                        val ddgLines = links.mapIndexed { idx, m ->
+                            val url = m.groupValues[1]
+                            val title = stripHtml(m.groupValues[2])
+                            val snip = snippets.getOrNull(idx).orEmpty()
+                            "- $title: ${snip.take(180)} ($url)"
+                        }
+                        if (ddgLines.isNotEmpty()) {
+                            sections.add("### Risultati Web\n" + ddgLines.joinToString("\n"))
+                        }
+                    }
+                }
+            }
+        }
+
+        if (sections.isEmpty()) {
+            "Nessun risultato web trovato per '$cleanQuery'. Verifica che il Pixel sia connesso a Internet."
+        } else {
+            buildString {
+                appendLine("Risultati ricerca Internet per \"$cleanQuery\":")
+                appendLine()
+                append(sections.joinToString("\n\n"))
+            }.take(2400).trimEnd()
         }
     }
 

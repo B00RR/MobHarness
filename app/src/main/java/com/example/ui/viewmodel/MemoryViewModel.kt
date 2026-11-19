@@ -7,7 +7,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.data.db.AgentSkillEntity
 import com.example.data.db.MemoryEntryEntity
 import com.example.data.vault.VaultDocuments
-import com.example.di.HermesAppContainer
+import com.example.di.MobHarnAppContainer
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -30,7 +30,7 @@ data class MemoryUiState(
 
 class MemoryViewModel(
     private val appContext: Context,
-    private val container: HermesAppContainer
+    private val container: MobHarnAppContainer
 ) : ViewModel() {
 
     private val repo = container.repository
@@ -46,13 +46,6 @@ class MemoryViewModel(
 
     val skills: StateFlow<List<AgentSkillEntity>> = repo.skillsFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
-
-    init {
-        reloadVault()
-        viewModelScope.launch {
-            memories.collect { reloadVault() }
-        }
-    }
 
     fun reloadVault() {
         viewModelScope.launch {

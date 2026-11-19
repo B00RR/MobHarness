@@ -64,7 +64,7 @@ class CodeSandboxRunner(private val context: Context) {
                         }
                     }
                 }
-                webView.addJavascriptInterface(bridge, "HermesBridge")
+                webView.addJavascriptInterface(bridge, "MobHarnBridge")
 
                 val encoded = JSONObject.quote(code)
                 val harnessHtml = """
@@ -96,10 +96,10 @@ class CodeSandboxRunner(private val context: Context) {
                         if (logs.length === 0) {
                           logs.push('(eseguito senza output in console)');
                         }
-                        HermesBridge.onComplete(true, logs.join('\n'));
+                        MobHarnBridge.onComplete(true, logs.join('\n'));
                       } catch (err) {
                         logs.push('Exception: ' + (err && err.stack ? err.stack : String(err)));
-                        HermesBridge.onComplete(false, logs.join('\n'));
+                        MobHarnBridge.onComplete(false, logs.join('\n'));
                       }
                     })();
                     </script>
@@ -107,7 +107,7 @@ class CodeSandboxRunner(private val context: Context) {
                 """.trimIndent()
 
                 webView.loadDataWithBaseURL(
-                    "https://sandbox.hermes.local/",
+                    "https://sandbox.mobharn.local/",
                     harnessHtml,
                     "text/html",
                     "UTF-8",
@@ -141,7 +141,9 @@ class CodeSandboxRunner(private val context: Context) {
             } finally {
                 runCatching {
                     webView?.stopLoading()
-                    webView?.removeJavascriptInterface("HermesBridge")
+                    webView?.removeJavascriptInterface("MobHarnBridge")
+                    webView?.clearCache(true)
+                    webView?.clearHistory()
                     webView?.destroy()
                 }
             }

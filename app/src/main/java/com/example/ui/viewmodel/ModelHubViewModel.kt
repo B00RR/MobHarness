@@ -1,13 +1,15 @@
 package com.example.ui.viewmodel
 
+import android.content.Context
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import coil.Coil
 import com.example.agent.EngineStatus
 import com.example.agent.tools.DeviceHardwareSummary
 import com.example.data.db.ModelProfileEntity
 import com.example.data.prefs.AppPreferences
-import com.example.di.HermesAppContainer
+import com.example.di.MobHarnAppContainer
 import com.example.ui.theme.ThemeMode
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -28,7 +30,8 @@ data class ModelHubUiState(
 )
 
 class ModelHubViewModel(
-    private val container: HermesAppContainer
+    private val appContext: Context,
+    private val container: MobHarnAppContainer
 ) : ViewModel() {
 
     private val repo = container.repository
@@ -47,10 +50,6 @@ class ModelHubViewModel(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), AppPreferences())
 
     val engineStatus: StateFlow<EngineStatus> = runtime.status
-
-    init {
-        refreshHardware()
-    }
 
     fun refreshHardware() {
         _uiState.update { it.copy(hardware = container.systemActions.getHardwareSummary()) }
@@ -78,7 +77,8 @@ class ModelHubViewModel(
     fun loadModel(profile: ModelProfileEntity) {
         viewModelScope.launch {
             repo.prefs.setActiveModelId(profile.id)
-            val result = runtime.loadModel(profile)
+            val ecoMode = preferences.value.ecoThermalMode
+            val result = runtime.loadModel(profile, ecoThermalMode = ecoMode)
             result.onSuccess {
                 refreshHardware()
                 _events.tryEmit("${profile.displayName} caricato e pronto in Chat!")
@@ -91,8 +91,9 @@ class ModelHubViewModel(
     fun unloadModel() {
         viewModelScope.launch {
             runtime.unloadModel()
+            runCatching { Coil.imageLoader(appContext).memoryCache?.clear() }
             refreshHardware()
-            _events.tryEmit("Modello scaricato dalla memoria.")
+            _events.tryEmit("Modello scaricato e memoria liberata.")
         }
     }
 
@@ -120,5 +121,13 @@ class ModelHubViewModel(
 
     fun setUseDynamicColor(enabled: Boolean) {
         viewModelScope.launch { repo.prefs.setUseDynamicColor(enabled) }
+    }
+
+    fun setEcoThermalMode(enabled: Boolean) {
+        viewModelScope.launch { repo.prefs.setEcoThermalMode(enabled) }
+    }
+
+    fun setAutoUnloadInBackground(enabled: Boolean) {
+        viewModelScope.launch { repo.prefs.setAutoUnloadInBackground(enabled) }
     }
 }

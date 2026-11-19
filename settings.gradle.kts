@@ -22,6 +22,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "Hermes Edge"
+rootProject.name = "MobHarn"
 
 include(":app")

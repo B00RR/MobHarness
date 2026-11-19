@@ -1,8 +1,8 @@
 package com.example.agent.tools
 
-import com.example.agent.phoneuse.HermesAccessibilityService
+import com.example.agent.phoneuse.MobHarnAccessibilityService
 import com.example.agent.sandbox.CodeSandboxRunner
-import com.example.data.HermesRepository
+import com.example.data.MobHarnRepository
 import com.example.data.prefs.ToolGroup
 import com.google.ai.edge.litertlm.Tool
 import com.google.ai.edge.litertlm.ToolParam
@@ -10,7 +10,7 @@ import com.google.ai.edge.litertlm.ToolSet
 import org.json.JSONObject
 
 class SelfEvolveToolSet(
-    private val repository: HermesRepository,
+    private val repository: MobHarnRepository,
     private val sandbox: CodeSandboxRunner,
     private val monitor: ToolExecutionMonitor
 ) : ToolSet {
@@ -26,7 +26,7 @@ class SelfEvolveToolSet(
         category = ToolGroup.SELF_EVOLVE.id,
         argsSummary = "$name: ${description.take(70)}",
         isExternalOrMutating = true,
-        approvalDescription = "Salvare il nuovo Custom Tool permanente '$name' nell'harness Hermes?"
+        approvalDescription = "Salvare il nuovo Custom Tool permanente '$name' in MobHarn?"
     ) {
         // Dry-run syntax verification inside the real JS sandbox before saving
         val syntaxCheck = sandbox.runJavaScript("new Function('INPUT', ${JSONObject.quote(jsCode)}); return 'SYNTAX_OK';")
@@ -173,7 +173,7 @@ class PhoneUseToolSet(
     private val monitor: ToolExecutionMonitor
 ) : ToolSet {
 
-    private fun requireService(): HermesAccessibilityService? = HermesAccessibilityService.instance
+    private fun requireService(): MobHarnAccessibilityService? = MobHarnAccessibilityService.instance
 
     @Tool(description = "Legge l'albero UI reale dello schermo attualmente visibile sul Pixel (app aperta, testi, bottoni cliccabili, campi input e coordinate)")
     fun read_screen_ui(
@@ -184,7 +184,7 @@ class PhoneUseToolSet(
         argsSummary = "maxNodes=$maxNodes"
     ) {
         val svc = requireService()
-            ?: return@executeTracked "Servizio Accessibilità Hermes Edge non attivo. L'utente deve attivarlo da Studio → Strumenti → Apri Accessibilità."
+            ?: return@executeTracked "Servizio Accessibilità MobHarn non attivo. L'utente deve attivarlo da Studio → Strumenti → Apri Accessibilità."
         svc.captureScreenTree(maxNodes.coerceIn(10, 150))
     }
 

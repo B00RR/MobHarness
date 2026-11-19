@@ -24,7 +24,13 @@ interface ChatDao {
     @Query("DELETE FROM chat_sessions WHERE id = :sessionId")
     suspend fun deleteSession(sessionId: Long)
 
-    @Query("SELECT * FROM chat_messages WHERE sessionId = :sessionId ORDER BY timestamp ASC, id ASC")
+    @Query(
+        """
+        SELECT * FROM (
+            SELECT * FROM chat_messages WHERE sessionId = :sessionId ORDER BY timestamp DESC, id DESC LIMIT 120
+        ) ORDER BY timestamp ASC, id ASC
+        """
+    )
     fun observeMessages(sessionId: Long): Flow<List<ChatMessageEntity>>
 
     @Query("SELECT * FROM chat_messages WHERE sessionId = :sessionId ORDER BY timestamp ASC, id ASC")
@@ -178,6 +184,9 @@ interface ToolLogDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertLog(log: ToolExecutionLogEntity): Long
+
+    @Query("DELETE FROM tool_execution_logs WHERE id NOT IN (SELECT id FROM tool_execution_logs ORDER BY timestamp DESC LIMIT 100)")
+    suspend fun pruneOldLogs()
 
     @Query("DELETE FROM tool_execution_logs")
     suspend fun clearLogs()

@@ -50,7 +50,7 @@ class WorkspaceManager(context: Context) {
         dir.mkdirs()
         val readme = File(dir, "README.md")
         if (!readme.exists()) {
-            readme.writeText("# $safe\n\nProgetto creato nel Coding Workspace di Hermes Edge.\n")
+            readme.writeText("# $safe\n\nProgetto creato nel Coding Workspace di MobHarn.\n")
         }
         safe
     }
@@ -233,7 +233,7 @@ class WorkspaceManager(context: Context) {
             <head>
               <meta charset="UTF-8" />
               <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-              <title>Hermes Sandbox Demo</title>
+              <title>MobHarn Sandbox Demo</title>
               <style>
                 body {
                   margin: 0; padding: 20px;
@@ -255,7 +255,7 @@ class WorkspaceManager(context: Context) {
             </head>
             <body>
               <div class="card">
-                <h2>Hermes Live Preview</h2>
+                <h2>MobHarn Live Preview</h2>
                 <p>Modifica questo progetto con Gemma 4 oppure direttamente dall'editor codice.</p>
                 <div id="count">0</div>
                 <button onclick="step(1)">+1</button>
@@ -289,7 +289,7 @@ class WorkspaceManager(context: Context) {
               return a;
             }
 
-            console.log("Hermes JS Sandbox pronto! fib(10) =", fibonacci(10));
+            console.log("MobHarn JS Sandbox pronto! fib(10) =", fibonacci(10));
         """.trimIndent()
 
         private val STARTER_SQL = """

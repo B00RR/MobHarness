@@ -21,7 +21,7 @@ import androidx.room.RoomDatabase
     version = 2,
     exportSchema = false
 )
-abstract class HermesDatabase : RoomDatabase() {
+abstract class MobHarnDatabase : RoomDatabase() {
     abstract fun chatDao(): ChatDao
     abstract fun memoryDao(): MemoryDao
     abstract fun skillDao(): SkillDao
@@ -33,14 +33,14 @@ abstract class HermesDatabase : RoomDatabase() {
 
     companion object {
         @Volatile
-        private var INSTANCE: HermesDatabase? = null
+        private var INSTANCE: MobHarnDatabase? = null
 
-        fun getInstance(context: Context): HermesDatabase {
+        fun getInstance(context: Context): MobHarnDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
                     context.applicationContext,
-                    HermesDatabase::class.java,
-                    "hermes_edge.db"
+                    MobHarnDatabase::class.java,
+                    "mobharn.db"
                 )
                     .fallbackToDestructiveMigration(dropAllTables = true)
                     .build()

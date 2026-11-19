@@ -13,7 +13,7 @@ import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import com.example.R
 import com.example.agent.tools.AndroidSystemActions
-import com.example.data.db.HermesDatabase
+import com.example.data.db.MobHarnDatabase
 import com.example.data.vault.MarkdownVaultManager
 import com.example.data.workspace.WorkspaceManager
 
@@ -26,7 +26,13 @@ class AutomationWorker(
         val taskId = inputData.getLong(KEY_TASK_ID, -1L)
         if (taskId <= 0L) return Result.failure()
 
-        val db = HermesDatabase.getInstance(applicationContext)
+        val isManual = inputData.getBoolean(KEY_MANUAL_RUN, false)
+        val pm = applicationContext.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+        if (!isManual && runCatching { pm.isPowerSaveMode }.getOrDefault(false)) {
+            return Result.success()
+        }
+
+        val db = MobHarnDatabase.getInstance(applicationContext)
         val task = db.automationDao().getTaskById(taskId) ?: return Result.success()
         val system = AndroidSystemActions(applicationContext)
         val vault = MarkdownVaultManager(applicationContext)
@@ -54,7 +60,7 @@ class AutomationWorker(
                 else -> { // BRIEFING
                     val hw = system.getHardwareSummary()
                     val memCount = db.memoryDao().getAllMemories().size
-                    "Briefing Hermes: Batteria ${hw.batteryPercent}%, RAM libera ${"%.1f".format(hw.availableRamGb)} GB, Rete ${hw.networkStatus}, $memCount memorie attive. Prompt: ${task.prompt}"
+                    "Briefing MobHarn: Batteria ${hw.batteryPercent}%, RAM libera ${"%.1f".format(hw.availableRamGb)} GB, Rete ${hw.networkStatus}, $memCount memorie attive. Prompt: ${task.prompt}"
                 }
             }
         }.getOrElse { e ->
@@ -82,7 +88,7 @@ class AutomationWorker(
         }
         val notification = NotificationCompat.Builder(applicationContext, CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle("Hermes Edge • $title")
+            .setContentTitle("MobHarn • $title")
             .setContentText(body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
@@ -98,7 +104,7 @@ class AutomationWorker(
             val manager = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "Automazioni Hermes Edge",
+                "Automazioni MobHarn",
                 NotificationManager.IMPORTANCE_DEFAULT
             ).apply {
                 description = "Notifiche completamento task pianificati in background"
@@ -109,6 +115,7 @@ class AutomationWorker(
 
     companion object {
         const val KEY_TASK_ID = "automation_task_id"
-        private const val CHANNEL_ID = "hermes_automations"
+        const val KEY_MANUAL_RUN = "automation_manual_run"
+        private const val CHANNEL_ID = "mobharn_automations"
     }
 }

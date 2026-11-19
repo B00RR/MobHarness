@@ -1,9 +1,11 @@
 package com.example.agent.automation
 
 import android.content.Context
+import androidx.work.Constraints
 import androidx.work.Data
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.ExistingWorkPolicy
+import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
@@ -23,9 +25,25 @@ class AutomationScheduler(context: Context) {
             .putLong(AutomationWorker.KEY_TASK_ID, task.id)
             .build()
 
+        // Battery-friendly OS constraints: never drain low battery, and only wake radio for web tasks when connected
+        val constraints = Constraints.Builder()
+            .setRequiresBatteryNotLow(true)
+            .apply {
+                if (task.actionType == "WEB_MONITOR") {
+                    setRequiredNetworkType(NetworkType.CONNECTED)
+                }
+            }
+            .build()
+
         if (task.isPeriodic) {
             val interval = task.intervalMinutes.coerceAtLeast(15L)
-            val request = PeriodicWorkRequestBuilder<AutomationWorker>(interval, TimeUnit.MINUTES)
+            // Flex interval lets Android batch wakeups in Doze maintenance windows
+            val flexInterval = (interval / 4L).coerceAtLeast(5L)
+            val request = PeriodicWorkRequestBuilder<AutomationWorker>(
+                interval, TimeUnit.MINUTES,
+                flexInterval, TimeUnit.MINUTES
+            )
+                .setConstraints(constraints)
                 .setInputData(input)
                 .addTag(task.workTag)
                 .build()
@@ -37,6 +55,7 @@ class AutomationScheduler(context: Context) {
         } else {
             val delayMin = task.intervalMinutes.coerceAtLeast(1L)
             val request = OneTimeWorkRequestBuilder<AutomationWorker>()
+                .setConstraints(constraints)
                 .setInitialDelay(delayMin, TimeUnit.MINUTES)
                 .setInputData(input)
                 .addTag(task.workTag)
@@ -52,6 +71,7 @@ class AutomationScheduler(context: Context) {
     fun runNow(task: AutomationTaskEntity) {
         val input = Data.Builder()
             .putLong(AutomationWorker.KEY_TASK_ID, task.id)
+            .putBoolean(AutomationWorker.KEY_MANUAL_RUN, true)
             .build()
         val request = OneTimeWorkRequestBuilder<AutomationWorker>()
             .setInputData(input)

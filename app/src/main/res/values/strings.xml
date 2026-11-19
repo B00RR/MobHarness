@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">Hermes Edge</string>
+    <string name="app_name">MobHarn</string>
     <string name="nav_chat">Chat</string>
     <string name="nav_studio">Studio</string>
     <string name="nav_memory">Memoria</string>
@@ -14,6 +14,6 @@
     <string name="cd_import_model">Importa modello .litertlm</string>
     <string name="cd_export_markdown">Esporta memoria Markdown</string>
     <string name="cd_export_zip">Esporta progetto ZIP</string>
-    <string name="cd_hero_banner">Illustrazione Hermes Edge per Gemma 4 on-device</string>
-    <string name="accessibility_service_description">Consente all\'agente locale Gemma 4 in Hermes Edge di leggere gli elementi sullo schermo ed eseguire tap, digitazione o scorrimenti su tua richiesta.</string>
+    <string name="cd_hero_banner">Illustrazione MobHarn per Gemma 4 on-device</string>
+    <string name="accessibility_service_description">Consente all\'agente locale Gemma 4 in MobHarn di leggere gli elementi sullo schermo ed eseguire tap, digitazione o scorrimenti su tua richiesta.</string>
 </resources>

@@ -2,7 +2,7 @@ package com.example.agent.tools
 
 import com.example.agent.automation.AutomationScheduler
 import com.example.agent.sandbox.CodeSandboxRunner
-import com.example.data.HermesRepository
+import com.example.data.MobHarnRepository
 import com.example.data.db.AutomationTaskEntity
 import com.example.data.prefs.ToolGroup
 import com.google.ai.edge.litertlm.Tool
@@ -71,7 +71,7 @@ class AgentApprovalCoordinator {
 }
 
 class ToolExecutionMonitor(
-    private val repository: HermesRepository,
+    private val repository: MobHarnRepository,
     private val approvalCoordinator: AgentApprovalCoordinator
 ) {
     @Volatile var activeSessionId: Long? = null
@@ -139,7 +139,7 @@ class ToolExecutionMonitor(
 }
 
 class MemoryAndSkillsToolSet(
-    private val repository: HermesRepository,
+    private val repository: MobHarnRepository,
     private val monitor: ToolExecutionMonitor
 ) : ToolSet {
 
@@ -199,7 +199,7 @@ class MemoryAndSkillsToolSet(
         "# Skill: ${skill.title} (/${skill.slug})\n${skill.instructionsMd}"
     }
 
-    @Tool(description = "Salva o aggiorna una Skill procedurale riutilizzabile nella libreria Hermes")
+    @Tool(description = "Salva o aggiorna una Skill procedurale riutilizzabile nella libreria locale")
     fun save_skill(
         @ToolParam(description = "Slug breve univoco (es. kotlin_refactor)") slug: String,
         @ToolParam(description = "Titolo descrittivo") title: String,
@@ -216,7 +216,7 @@ class MemoryAndSkillsToolSet(
 }
 
 class CodingWorkspaceToolSet(
-    private val repository: HermesRepository,
+    private val repository: MobHarnRepository,
     private val sandbox: CodeSandboxRunner,
     private val monitor: ToolExecutionMonitor
 ) : ToolSet {
@@ -327,7 +327,7 @@ class AndroidActionsToolSet(
     fun set_alarm(
         @ToolParam(description = "Ora 0-23") hour: Int,
         @ToolParam(description = "Minuti 0-59") minute: Int,
-        @ToolParam(description = "Etichetta della sveglia") message: String = "Hermes Edge"
+        @ToolParam(description = "Etichetta della sveglia") message: String = "MobHarn"
     ): String = monitor.executeTracked(
         toolName = "set_alarm",
         category = ToolGroup.ANDROID_ACTIONS.id,
@@ -361,21 +361,19 @@ class AndroidActionsToolSet(
         toolName = "open_maps",
         category = ToolGroup.ANDROID_ACTIONS.id,
         argsSummary = query,
-        isExternalOrMutating = true,
-        approvalDescription = "Aprire Google Maps su '$query'?"
+        isExternalOrMutating = false
     ) {
         system.openMaps(query)
     }
 
-    @Tool(description = "Avvia un'applicazione installata sul telefono cercandola per nome")
+    @Tool(description = "Avvia subito un'applicazione installata sul telefono Pixel cercandola per nome (es. YouTube, WhatsApp, Chrome, Fotocamera, Spotify, Impostazioni)")
     fun launch_app(
-        @ToolParam(description = "Nome dell'app (es. Fotocamera, Spotify, Gmail)") appName: String
+        @ToolParam(description = "Nome dell'app da aprire (es. YouTube, WhatsApp, Fotocamera, Spotify, Gmail)") appName: String
     ): String = monitor.executeTracked(
         toolName = "launch_app",
         category = ToolGroup.ANDROID_ACTIONS.id,
         argsSummary = appName,
-        isExternalOrMutating = true,
-        approvalDescription = "Avviare l'app '$appName'?"
+        isExternalOrMutating = false
     ) {
         system.launchApp(appName)
     }
@@ -387,8 +385,7 @@ class AndroidActionsToolSet(
         toolName = "open_url",
         category = ToolGroup.ANDROID_ACTIONS.id,
         argsSummary = url,
-        isExternalOrMutating = true,
-        approvalDescription = "Aprire il link $url nel browser?"
+        isExternalOrMutating = false
     ) {
         system.openUrl(url)
     }
@@ -396,13 +393,12 @@ class AndroidActionsToolSet(
     @Tool(description = "Avvia un timer sul Pixel")
     fun set_timer(
         @ToolParam(description = "Durata in secondi") seconds: Int,
-        @ToolParam(description = "Etichetta timer") message: String = "Timer Hermes"
+        @ToolParam(description = "Etichetta timer") message: String = "Timer MobHarn"
     ): String = monitor.executeTracked(
         toolName = "set_timer",
         category = ToolGroup.ANDROID_ACTIONS.id,
         argsSummary = "${seconds}s ($message)",
-        isExternalOrMutating = true,
-        approvalDescription = "Avviare un timer di $seconds secondi ($message)?"
+        isExternalOrMutating = false
     ) {
         system.setTimer(seconds, message)
     }
@@ -469,8 +465,7 @@ class AndroidActionsToolSet(
         toolName = "open_system_settings",
         category = ToolGroup.ANDROID_ACTIONS.id,
         argsSummary = "settings:$section",
-        isExternalOrMutating = true,
-        approvalDescription = "Aprire le Impostazioni Android ($section)?"
+        isExternalOrMutating = false
     ) {
         system.openSystemSettings(section)
     }
@@ -572,7 +567,7 @@ class DeviceTelemetryToolSet(
 }
 
 class AutomationToolSet(
-    private val repository: HermesRepository,
+    private val repository: MobHarnRepository,
     private val scheduler: AutomationScheduler,
     private val monitor: ToolExecutionMonitor
 ) : ToolSet {
@@ -591,7 +586,7 @@ class AutomationToolSet(
         isExternalOrMutating = true,
         approvalDescription = "Pianificare l'automazione '$name' ogni $intervalMinutes min?"
     ) {
-        val tag = "hermes_auto_${System.currentTimeMillis()}"
+        val tag = "mobharn_auto_${System.currentTimeMillis()}"
         val entity = AutomationTaskEntity(
             name = name,
             prompt = prompt,
@@ -607,8 +602,8 @@ class AutomationToolSet(
     }
 }
 
-class HermesToolkitRegistry(
-    private val repository: HermesRepository,
+class MobHarnToolkitRegistry(
+    private val repository: MobHarnRepository,
     private val system: AndroidSystemActions,
     private val sandbox: CodeSandboxRunner,
     private val scheduler: AutomationScheduler,
@@ -623,12 +618,116 @@ class HermesToolkitRegistry(
     val selfEvolveTools = SelfEvolveToolSet(repository, sandbox, monitor)
     val phoneUseTools = PhoneUseToolSet(monitor)
 
+    /**
+     * Selects a focused subset of enabled ToolGroups for the current prompt so edge models
+     * like Gemma 4 E2B/E4B don't drown in 44 tool schemas inside a 4K-8K context window.
+     */
+    fun selectRoutedToolGroups(userPrompt: String, enabledGroups: Set<String>): Set<String> {
+        val p = userPrompt.lowercase()
+        val selected = linkedSetOf<String>()
+
+        fun addIfEnabled(group: ToolGroup) {
+            if (group.id in enabledGroups) selected.add(group.id)
+        }
+
+        // 1. Web Search / Live info / Math / URLs
+        if (p.containsAny(
+                "cerca", "ricerca", "internet", "web", "google", "online", "notizie", "news",
+                "meteo", "tempo fa", "oggi", "ultime", "prezzo", "quanto costa", "chi è", "chi ha",
+                "cos'è", "cosa è", "http://", "https://", "www.", "sito", "link", "pagina",
+                "calcola", "quanto fa", "radice", "percentuale", "json", "regex", "wikipedia"
+            )
+        ) {
+            addIfEnabled(ToolGroup.WEB_CALC)
+        }
+
+        // 2. Coding Workspace & Sandbox
+        if (p.containsAny(
+                "codice", "code", "file", "workspace", "progetto", "studio", "script", "javascript",
+                "js", "sql", "sqlite", "html", "css", "kotlin", "python", "patch", "bug", "errore",
+                "funzione", "sandbox", "esegui", "compila", "testa", "index.html", "app.js"
+            )
+        ) {
+            addIfEnabled(ToolGroup.CODING)
+        }
+
+        // 3. Phone-Use (Accessibility UI control)
+        if (p.containsAny(
+                "schermo", "screen", "clicca", "tocca", "premi", "tap", "scorri", "scroll",
+                "digita", "scrivi nel campo", "leggi lo schermo", "cosa vedi", "accessibilit",
+                "indietro", "home", "notifiche", "screenshot"
+            )
+        ) {
+            addIfEnabled(ToolGroup.PHONE_USE)
+        }
+
+        // 4. Android System Actions
+        if (p.containsAny(
+                "sveglia", "allarme", "timer", "calendario", "evento", "appuntamento", "mappa",
+                "maps", "indicazioni", "apri", "aprir", "avvia", "lancia", "app", "applicazion",
+                "youtube", "whatsapp", "spotify", "chrome", "instagram", "telegram", "fotocamera",
+                "camera", "galleria", "foto", "calcolatrice", "orologio", "gmail", "contatti",
+                "email", "mail", "sms", "messaggio", "chiama", "telefono", "condividi",
+                "impostazioni", "wifi", "bluetooth"
+            )
+        ) {
+            addIfEnabled(ToolGroup.ANDROID_ACTIONS)
+        }
+
+        // 5. Device Telemetry & Sensors
+        if (p.containsAny(
+                "batteria", "ram", "memoria libera", "storage", "spazio", "temperatura", "cpu",
+                "rete", "telemetria", "appunti", "clipboard", "sensore", "sensori", "luce",
+                "barometro", "posizione", "dove sono", "gps", "pixel"
+            )
+        ) {
+            addIfEnabled(ToolGroup.TELEMETRY)
+        }
+
+        // 6. Self-Evolving Harness & Custom Tools
+        if (p.containsAny(
+                "harness", "custom tool", "nuovo tool", "crea tool", "crea uno strumento",
+                "soul.md", "migliora te stesso", "auto-evolv", "ottimizza", "temperatura modello",
+                "parametri", "run_custom_tool"
+            )
+        ) {
+            addIfEnabled(ToolGroup.SELF_EVOLVE)
+        }
+
+        // 7. Background Automations
+        if (p.containsAny("automazione", "pianifica", "ogni ora", "ogni giorno", "ricorrente", "cron", "background")) {
+            addIfEnabled(ToolGroup.AUTOMATIONS)
+        }
+
+        // 8. Persistent Memory & Skills
+        if (p.containsAny(
+                "ricorda", "memorizza", "memoria", "memory", "user.md", "skill", "sessione passata",
+                "abbiamo parlato", "salva che", "preferenza", "profilo"
+            )
+        ) {
+            addIfEnabled(ToolGroup.MEMORY)
+        }
+
+        // Default lean core when prompt is general or ambiguous: Web/Calc + Memory (only 9 tools!)
+        if (selected.isEmpty()) {
+            addIfEnabled(ToolGroup.WEB_CALC)
+            addIfEnabled(ToolGroup.MEMORY)
+            addIfEnabled(ToolGroup.TELEMETRY)
+        }
+
+        // Cap to at most 2 groups to keep tool schema tokens compact (<1200 tokens)
+        return selected.take(2).toSet()
+    }
+
+    private fun String.containsAny(vararg needles: String): Boolean =
+        needles.any { this.contains(it) }
+
     fun buildEnabledToolProviders(enabledGroups: Set<String>): List<ToolProvider> {
         val providers = mutableListOf<ToolProvider>()
+        if (ToolGroup.WEB_CALC.id in enabledGroups) providers.add(tool(webCalcTools))
         if (ToolGroup.MEMORY.id in enabledGroups) providers.add(tool(memoryTools))
         if (ToolGroup.CODING.id in enabledGroups) providers.add(tool(codingTools))
         if (ToolGroup.ANDROID_ACTIONS.id in enabledGroups) providers.add(tool(androidTools))
-        if (ToolGroup.WEB_CALC.id in enabledGroups) providers.add(tool(webCalcTools))
         if (ToolGroup.TELEMETRY.id in enabledGroups) providers.add(tool(telemetryTools))
         if (ToolGroup.AUTOMATIONS.id in enabledGroups) providers.add(tool(automationTools))
         if (ToolGroup.SELF_EVOLVE.id in enabledGroups) providers.add(tool(selfEvolveTools))

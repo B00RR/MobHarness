@@ -13,7 +13,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 
-private val HermesDarkColorScheme = darkColorScheme(
+private val MobHarnDarkColorScheme = darkColorScheme(
     primary = SagePrimaryDark,
     onPrimary = SageOnPrimaryDark,
     primaryContainer = SagePrimaryContainerDark,
@@ -42,7 +42,7 @@ private val HermesDarkColorScheme = darkColorScheme(
     error = StatusError
 )
 
-private val HermesLightColorScheme = lightColorScheme(
+private val MobHarnLightColorScheme = lightColorScheme(
     primary = SagePrimaryLight,
     onPrimary = SageOnPrimaryLight,
     primaryContainer = SagePrimaryContainerLight,
@@ -70,7 +70,7 @@ private val HermesLightColorScheme = lightColorScheme(
     outlineVariant = AlabasterOutlineVariant
 )
 
-val HermesShapes = Shapes(
+val MobHarnShapes = Shapes(
     extraSmall = RoundedCornerShape(8.dp),
     small = RoundedCornerShape(12.dp),
     medium = RoundedCornerShape(18.dp),
@@ -83,7 +83,7 @@ enum class ThemeMode {
 }
 
 @Composable
-fun HermesEdgeTheme(
+fun MobHarnTheme(
     themeMode: ThemeMode = ThemeMode.SYSTEM,
     dynamicColor: Boolean = true,
     content: @Composable () -> Unit
@@ -99,14 +99,14 @@ fun HermesEdgeTheme(
             val context = LocalContext.current
             if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
         }
-        darkTheme -> HermesDarkColorScheme
-        else -> HermesLightColorScheme
+        darkTheme -> MobHarnDarkColorScheme
+        else -> MobHarnLightColorScheme
     }
 
     MaterialTheme(
         colorScheme = colorScheme,
         typography = Typography,
-        shapes = HermesShapes,
+        shapes = MobHarnShapes,
         content = content
     )
 }

@@ -13,7 +13,7 @@ import com.example.ui.theme.ThemeMode
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
-private val Context.hermesDataStore: DataStore<Preferences> by preferencesDataStore(name = "hermes_edge_prefs")
+private val Context.mobharnDataStore: DataStore<Preferences> by preferencesDataStore(name = "mobharn_prefs")
 
 enum class ToolGroup(val id: String, val label: String, val subtitle: String) {
     CODING("coding", "Coding & Sandbox", "Read/patch multi-file, grep, sandbox JS ES6+ e SQLite"),
@@ -33,7 +33,9 @@ data class AppPreferences(
     val activeModelId: Long = -1L,
     val requireApprovalForExternalActions: Boolean = true,
     val activeProjectName: String = "starter_web",
-    val enabledToolGroups: Set<String> = ToolGroup.entries.map { it.id }.toSet()
+    val enabledToolGroups: Set<String> = ToolGroup.entries.map { it.id }.toSet(),
+    val ecoThermalMode: Boolean = true,
+    val autoUnloadInBackground: Boolean = true
 )
 
 class PreferencesRepository(private val context: Context) {
@@ -45,9 +47,11 @@ class PreferencesRepository(private val context: Context) {
         val REQUIRE_APPROVAL = booleanPreferencesKey("require_approval_external")
         val ACTIVE_PROJECT = stringPreferencesKey("active_project_name")
         val ENABLED_TOOL_GROUPS = stringSetPreferencesKey("enabled_tool_groups")
+        val ECO_THERMAL_MODE = booleanPreferencesKey("eco_thermal_mode")
+        val AUTO_UNLOAD_BACKGROUND = booleanPreferencesKey("auto_unload_background")
     }
 
-    val preferences: Flow<AppPreferences> = context.hermesDataStore.data.map { prefs ->
+    val preferences: Flow<AppPreferences> = context.mobharnDataStore.data.map { prefs ->
         val themeStr = prefs[Keys.THEME_MODE] ?: ThemeMode.SYSTEM.name
         val themeMode = runCatching { ThemeMode.valueOf(themeStr) }.getOrDefault(ThemeMode.SYSTEM)
         AppPreferences(
@@ -57,32 +61,42 @@ class PreferencesRepository(private val context: Context) {
             requireApprovalForExternalActions = prefs[Keys.REQUIRE_APPROVAL] ?: true,
             activeProjectName = prefs[Keys.ACTIVE_PROJECT] ?: "starter_web",
             enabledToolGroups = prefs[Keys.ENABLED_TOOL_GROUPS]
-                ?: ToolGroup.entries.map { it.id }.toSet()
+                ?: ToolGroup.entries.map { it.id }.toSet(),
+            ecoThermalMode = prefs[Keys.ECO_THERMAL_MODE] ?: true,
+            autoUnloadInBackground = prefs[Keys.AUTO_UNLOAD_BACKGROUND] ?: true
         )
     }
 
     suspend fun setThemeMode(mode: ThemeMode) {
-        context.hermesDataStore.edit { it[Keys.THEME_MODE] = mode.name }
+        context.mobharnDataStore.edit { it[Keys.THEME_MODE] = mode.name }
     }
 
     suspend fun setUseDynamicColor(enabled: Boolean) {
-        context.hermesDataStore.edit { it[Keys.USE_DYNAMIC_COLOR] = enabled }
+        context.mobharnDataStore.edit { it[Keys.USE_DYNAMIC_COLOR] = enabled }
     }
 
     suspend fun setActiveModelId(id: Long) {
-        context.hermesDataStore.edit { it[Keys.ACTIVE_MODEL_ID] = id }
+        context.mobharnDataStore.edit { it[Keys.ACTIVE_MODEL_ID] = id }
     }
 
     suspend fun setRequireApproval(require: Boolean) {
-        context.hermesDataStore.edit { it[Keys.REQUIRE_APPROVAL] = require }
+        context.mobharnDataStore.edit { it[Keys.REQUIRE_APPROVAL] = require }
     }
 
     suspend fun setActiveProject(projectName: String) {
-        context.hermesDataStore.edit { it[Keys.ACTIVE_PROJECT] = projectName }
+        context.mobharnDataStore.edit { it[Keys.ACTIVE_PROJECT] = projectName }
+    }
+
+    suspend fun setEcoThermalMode(enabled: Boolean) {
+        context.mobharnDataStore.edit { it[Keys.ECO_THERMAL_MODE] = enabled }
+    }
+
+    suspend fun setAutoUnloadInBackground(enabled: Boolean) {
+        context.mobharnDataStore.edit { it[Keys.AUTO_UNLOAD_BACKGROUND] = enabled }
     }
 
     suspend fun toggleToolGroup(groupId: String, enabled: Boolean) {
-        context.hermesDataStore.edit { prefs ->
+        context.mobharnDataStore.edit { prefs ->
             val current = (prefs[Keys.ENABLED_TOOL_GROUPS]
                 ?: ToolGroup.entries.map { it.id }.toSet()).toMutableSet()
             if (enabled) current.add(groupId) else current.remove(groupId)
