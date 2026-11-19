@@ -317,19 +317,26 @@ class ChatViewModel(
         viewModelScope.launch {
             val activeMaxCtx = (engineStatus.value as? EngineStatus.Ready)?.model?.maxNumTokens
                 ?: _uiState.value.contextTokensMax
-            val msgs = repo.getMessages(sessionId)
-            val existingDigest = repo.getSessionDigest(sessionId)
+            val checkpoint = repo.getSessionCheckpoint(sessionId)
+            val hotTurns = ContextAndMemoryEngine.getHotTurnCount(activeMaxCtx)
+            val msgs = repo.getMessages(
+                sessionId = sessionId,
+                afterMessageId = checkpoint.lastSummarizedMessageId,
+                recentLimit = hotTurns + 4
+            )
+            val existingDigest = checkpoint.digest
             val plan = withContext(Dispatchers.Default) {
                 ContextAndMemoryEngine.buildContextWindowPlan(
                     allPriorMessages = msgs,
                     existingDigest = existingDigest,
                     maxContextTokens = activeMaxCtx,
-                    forceCompaction = true
+                    forceCompaction = true,
+                    lastSummarizedMessageId = checkpoint.lastSummarizedMessageId
                 )
             }
 
             if (plan.updatedSessionDigest.isNotBlank()) {
-                repo.saveSessionDigest(sessionId, plan.updatedSessionDigest)
+                repo.saveSessionDigest(sessionId, plan.updatedSessionDigest, plan.lastSummarizedMessageId)
             }
             if (msgs.size >= 4 && plan.updatedSessionDigest.isNotBlank()) {
                 val firstLine = plan.updatedSessionDigest
@@ -491,23 +498,30 @@ class ChatViewModel(
                     userPrompt = prompt,
                     enabledGroups = currentPrefs.enabledToolGroups
                 )
-                val allPriorMessages = repo.getMessages(sessionId).dropLast(1)
-                val existingDigest = repo.getSessionDigest(sessionId)
+                val checkpoint = repo.getSessionCheckpoint(sessionId)
+                val hotTurns = ContextAndMemoryEngine.getHotTurnCount(latestContextMax)
+                val allPriorMessages = repo.getMessages(
+                    sessionId = sessionId,
+                    afterMessageId = checkpoint.lastSummarizedMessageId,
+                    recentLimit = hotTurns + 4
+                ).dropLast(1)
+                val existingDigest = checkpoint.digest
 
                 // Mobile 3-tier context plan: keeps verbatim hot turns + auto-compacts overflow into rolling checkpoint
                 val contextPlan = withContext(Dispatchers.Default) {
                     ContextAndMemoryEngine.buildContextWindowPlan(
                         allPriorMessages = allPriorMessages,
                         existingDigest = existingDigest,
-                        maxContextTokens = latestContextMax
+                        maxContextTokens = latestContextMax,
+                        lastSummarizedMessageId = checkpoint.lastSummarizedMessageId
                     )
                 }
 
                 val digestChanged = contextPlan.didAutoCompact &&
                     contextPlan.updatedSessionDigest.isNotBlank() &&
-                    contextPlan.updatedSessionDigest != existingDigest
+                    (contextPlan.updatedSessionDigest != existingDigest || contextPlan.lastSummarizedMessageId != checkpoint.lastSummarizedMessageId)
                 if (digestChanged) {
-                    repo.saveSessionDigest(sessionId, contextPlan.updatedSessionDigest)
+                    repo.saveSessionDigest(sessionId, contextPlan.updatedSessionDigest, contextPlan.lastSummarizedMessageId)
                     _uiState.update {
                         it.copy(
                             hasSessionDigest = true,

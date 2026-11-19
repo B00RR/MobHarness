@@ -160,17 +160,11 @@ class CodeSandboxRunner(private val context: Context) {
         }
         val db = SQLiteDatabase.create(null)
         try {
-            val statements = sqlScript
-                .lines()
-                .filterNot { it.trim().startsWith("--") }
-                .joinToString("\n")
-                .split(";")
-                .map { it.trim() }
-                .filter { it.isNotBlank() }
+            val statements = splitSqlStatements(sqlScript)
 
             val sb = StringBuilder()
             statements.forEachIndexed { idx, stmt ->
-                val upper = stmt.uppercase()
+                val upper = extractEffectiveCommand(stmt)
                 if (upper.startsWith("SELECT") || upper.startsWith("PRAGMA") || upper.startsWith("WITH") || upper.startsWith("EXPLAIN")) {
                     db.rawQuery(stmt, null).use { cursor ->
                         val cols = cursor.columnNames
@@ -252,7 +246,6 @@ class CodeSandboxRunner(private val context: Context) {
 
         // Convert Italian decimal comma `12,5` -> `12.5` only when NOT separating function arguments (e.g. `pow(2, 3)`)
         val out = StringBuilder(s.length)
-        var parenDepth = 0
         val inMultiArgFunc = ArrayDeque<Boolean>()
         var i = 0
         while (i < s.length) {
@@ -262,12 +255,10 @@ class CodeSandboxRunner(private val context: Context) {
                     val prefix = s.substring(0, i).trimEnd().lowercase()
                     val isMulti = prefix.endsWith("pow") || prefix.endsWith("min") || prefix.endsWith("max")
                     inMultiArgFunc.addLast(isMulti)
-                    parenDepth++
                     out.append(c)
                 }
                 ')' -> {
                     if (inMultiArgFunc.isNotEmpty()) inMultiArgFunc.removeLast()
-                    if (parenDepth > 0) parenDepth--
                     out.append(c)
                 }
                 ',' -> {
@@ -429,6 +420,305 @@ class CodeSandboxRunner(private val context: Context) {
             }
             if (eat('^'.code)) x = x.pow(parseFactor())
             return x
+        }
+    }
+
+    companion object {
+        /**
+         * Splits a SQL script into individual executable statements, honoring:
+         * - Single-quoted strings (including escaped '' quotes and semicolons inside quotes)
+         * - Double-quoted identifiers (including escaped "" quotes)
+         * - Backtick-quoted identifiers (`)
+         * - Bracketed identifiers ([...])
+         * - Line comments (-- to newline)
+         * - Block comments (/* ... */)
+         * - Trigger bodies (CREATE TRIGGER ... BEGIN ... END;) where internal semicolons are preserved
+         */
+        fun splitSqlStatements(sqlScript: String): List<String> {
+            if (sqlScript.isBlank()) return emptyList()
+
+            val statements = mutableListOf<String>()
+            val currentStmt = StringBuilder()
+            var i = 0
+            val n = sqlScript.length
+
+            var inSingleQuote = false
+            var inDoubleQuote = false
+            var inBacktick = false
+            var inBracket = false
+            var inLineComment = false
+            var inBlockComment = false
+
+            var inCreateTrigger = false
+            var triggerBeginDepth = 0
+            var caseDepth = 0
+
+            fun getWordAt(index: Int): String {
+                var end = index
+                while (end < n && (sqlScript[end].isLetterOrDigit() || sqlScript[end] == '_')) {
+                    end++
+                }
+                return sqlScript.substring(index, end)
+            }
+
+            while (i < n) {
+                val c = sqlScript[i]
+                val nextC = if (i + 1 < n) sqlScript[i + 1] else null
+
+                if (inSingleQuote) {
+                    currentStmt.append(c)
+                    if (c == '\'') {
+                        if (nextC == '\'') {
+                            currentStmt.append(nextC)
+                            i += 2
+                            continue
+                        } else {
+                            inSingleQuote = false
+                        }
+                    }
+                    i++
+                    continue
+                }
+
+                if (inDoubleQuote) {
+                    currentStmt.append(c)
+                    if (c == '"') {
+                        if (nextC == '"') {
+                            currentStmt.append(nextC)
+                            i += 2
+                            continue
+                        } else {
+                            inDoubleQuote = false
+                        }
+                    }
+                    i++
+                    continue
+                }
+
+                if (inBacktick) {
+                    currentStmt.append(c)
+                    if (c == '`') {
+                        inBacktick = false
+                    }
+                    i++
+                    continue
+                }
+
+                if (inBracket) {
+                    currentStmt.append(c)
+                    if (c == ']') {
+                        inBracket = false
+                    }
+                    i++
+                    continue
+                }
+
+                if (inLineComment) {
+                    currentStmt.append(c)
+                    if (c == '\n') {
+                        inLineComment = false
+                    }
+                    i++
+                    continue
+                }
+
+                if (inBlockComment) {
+                    currentStmt.append(c)
+                    if (c == '*' && nextC == '/') {
+                        currentStmt.append(nextC)
+                        inBlockComment = false
+                        i += 2
+                        continue
+                    }
+                    i++
+                    continue
+                }
+
+                // Check starting comments
+                if (c == '-' && nextC == '-') {
+                    inLineComment = true
+                    currentStmt.append(c).append(nextC)
+                    i += 2
+                    continue
+                }
+
+                if (c == '/' && nextC == '*') {
+                    inBlockComment = true
+                    currentStmt.append(c).append(nextC)
+                    i += 2
+                    continue
+                }
+
+                // Check starting quotes
+                if (c == '\'') {
+                    inSingleQuote = true
+                    currentStmt.append(c)
+                    i++
+                    continue
+                }
+                if (c == '"') {
+                    inDoubleQuote = true
+                    currentStmt.append(c)
+                    i++
+                    continue
+                }
+                if (c == '`') {
+                    inBacktick = true
+                    currentStmt.append(c)
+                    i++
+                    continue
+                }
+                if (c == '[') {
+                    inBracket = true
+                    currentStmt.append(c)
+                    i++
+                    continue
+                }
+
+                // Check keywords outside quotes & comments
+                if (c.isLetter() || c == '_') {
+                    val word = getWordAt(i)
+                    val upper = word.uppercase()
+                    if (upper == "TRIGGER") {
+                        val soFar = currentStmt.toString().uppercase()
+                        if (Regex("""\bCREATE\b""").containsMatchIn(soFar)) {
+                            inCreateTrigger = true
+                        }
+                    } else if (upper == "BEGIN") {
+                        if (inCreateTrigger) {
+                            triggerBeginDepth++
+                        }
+                    } else if (upper == "CASE") {
+                        caseDepth++
+                    } else if (upper == "END") {
+                        if (caseDepth > 0) {
+                            caseDepth--
+                        } else if (triggerBeginDepth > 0) {
+                            triggerBeginDepth--
+                            if (triggerBeginDepth == 0) {
+                                inCreateTrigger = false
+                            }
+                        }
+                    }
+                    currentStmt.append(word)
+                    i += word.length
+                    continue
+                }
+
+                // Semicolon handling
+                if (c == ';') {
+                    if (triggerBeginDepth == 0) {
+                        val stmt = currentStmt.toString().trim()
+                        if (stmt.isNotBlank() && !isOnlyComments(stmt)) {
+                            statements.add(stmt)
+                        }
+                        currentStmt.clear()
+                        inCreateTrigger = false
+                        caseDepth = 0
+                        i++
+                        continue
+                    } else {
+                        currentStmt.append(c)
+                        i++
+                        continue
+                    }
+                }
+
+                currentStmt.append(c)
+                i++
+            }
+
+            val finalStmt = currentStmt.toString().trim()
+            if (finalStmt.isNotBlank() && !isOnlyComments(finalStmt)) {
+                statements.add(finalStmt)
+            }
+
+            return statements
+        }
+
+        private fun isOnlyComments(stmt: String): Boolean {
+            var j = 0
+            val len = stmt.length
+            var inLine = false
+            var inBlock = false
+            while (j < len) {
+                val ch = stmt[j]
+                val next = if (j + 1 < len) stmt[j + 1] else null
+                if (inLine) {
+                    if (ch == '\n') inLine = false
+                    j++
+                    continue
+                }
+                if (inBlock) {
+                    if (ch == '*' && next == '/') {
+                        inBlock = false
+                        j += 2
+                        continue
+                    }
+                    j++
+                    continue
+                }
+                if (ch.isWhitespace()) {
+                    j++
+                    continue
+                }
+                if (ch == '-' && next == '-') {
+                    inLine = true
+                    j += 2
+                    continue
+                }
+                if (ch == '/' && next == '*') {
+                    inBlock = true
+                    j += 2
+                    continue
+                }
+                return false
+            }
+            return true
+        }
+
+        private fun extractEffectiveCommand(stmt: String): String {
+            var i = 0
+            val len = stmt.length
+            var inLine = false
+            var inBlock = false
+            while (i < len) {
+                val c = stmt[i]
+                val next = if (i + 1 < len) stmt[i + 1] else null
+                if (inLine) {
+                    if (c == '\n') inLine = false
+                    i++
+                    continue
+                }
+                if (inBlock) {
+                    if (c == '*' && next == '/') {
+                        inBlock = false
+                        i += 2
+                        continue
+                    }
+                    i++
+                    continue
+                }
+                if (c == '-' && next == '-') {
+                    inLine = true
+                    i += 2
+                    continue
+                }
+                if (c == '/' && next == '*') {
+                    inBlock = true
+                    i += 2
+                    continue
+                }
+                if (!c.isWhitespace()) {
+                    var end = i
+                    while (end < len && (stmt[end].isLetterOrDigit() || stmt[end] == '_')) {
+                        end++
+                    }
+                    return stmt.substring(i, end).uppercase()
+                }
+                i++
+            }
+            return ""
         }
     }
 }

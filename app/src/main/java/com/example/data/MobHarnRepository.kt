@@ -17,6 +17,7 @@ import com.example.data.db.WorkspaceSnapshotEntity
 import com.example.data.prefs.AppPreferences
 import com.example.data.prefs.PreferencesRepository
 import com.example.data.vault.MarkdownVaultManager
+import com.example.data.vault.SessionCheckpoint
 import com.example.data.vault.VaultDocuments
 import com.example.data.workspace.WorkspaceManager
 import kotlinx.coroutines.Dispatchers
@@ -25,6 +26,9 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
+import java.io.InputStream
+import java.util.UUID
 
 class MobHarnRepository(
     private val context: Context,
@@ -108,7 +112,18 @@ class MobHarnRepository(
     fun observeMessages(sessionId: Long): Flow<List<ChatMessageEntity>> =
         db.chatDao().observeMessages(sessionId)
 
-    suspend fun getMessages(sessionId: Long): List<ChatMessageEntity> =
+    suspend fun getMessages(
+        sessionId: Long,
+        afterMessageId: Long = 0L,
+        recentLimit: Int = 20
+    ): List<ChatMessageEntity> =
+        if (afterMessageId <= 0L && recentLimit >= 1000) {
+            db.chatDao().getMessages(sessionId)
+        } else {
+            db.chatDao().getMessages(sessionId, afterMessageId, recentLimit)
+        }
+
+    suspend fun getAllMessages(sessionId: Long): List<ChatMessageEntity> =
         db.chatDao().getMessages(sessionId)
 
     suspend fun createSession(title: String, projectName: String): Long =
@@ -121,9 +136,15 @@ class MobHarnRepository(
         vault.deleteSessionDigest(sessionId)
     }
 
+    suspend fun getSessionCheckpoint(sessionId: Long): SessionCheckpoint = vault.readSessionCheckpoint(sessionId)
+
     suspend fun getSessionDigest(sessionId: Long): String = vault.readSessionDigest(sessionId)
 
-    suspend fun saveSessionDigest(sessionId: Long, digest: String) = vault.writeSessionDigest(sessionId, digest)
+    suspend fun saveSessionDigest(
+        sessionId: Long,
+        digest: String,
+        lastSummarizedMessageId: Long = 0L
+    ) = vault.writeSessionDigest(sessionId, digest, lastSummarizedMessageId)
 
     suspend fun addMessage(message: ChatMessageEntity): Long = db.chatDao().insertMessage(message)
 
@@ -360,33 +381,72 @@ class MobHarnRepository(
                 }
             }
 
+            importModelFromStream(
+                displayName = displayName,
+                totalBytes = totalBytes,
+                openStream = { resolver.openInputStream(uri) },
+                onProgress = onProgress
+            ).getOrThrow()
+        }
+    }
+
+    internal suspend fun importModelFromStream(
+        displayName: String,
+        totalBytes: Long,
+        openStream: () -> InputStream?,
+        onProgress: (Float, String) -> Unit = { _, _ -> }
+    ): Result<ModelProfileEntity> = withContext(Dispatchers.IO) {
+        runCatching {
             val modelsDir = File(context.filesDir, "litertlm_models").apply { mkdirs() }
             val safeFileName = displayName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
             val destFile = File(modelsDir, safeFileName)
+            val tempFile = File(
+                modelsDir,
+                "${safeFileName}.${System.currentTimeMillis()}.${UUID.randomUUID().toString().take(8)}.tmp"
+            )
 
             onProgress(0.02f, "Copia di $displayName nello storage veloce del Pixel...")
 
-            resolver.openInputStream(uri)?.use { input ->
-                FileOutputStream(destFile).use { output ->
-                    val buffer = ByteArray(256 * 1024) // 256 KB chunk: fast UFS copy with 4x lower peak heap
-                    var copied = 0L
-                    var read: Int
-                    while (input.read(buffer).also { read = it } != -1) {
-                        output.write(buffer, 0, read)
-                        copied += read
-                        if (totalBytes > 0) {
-                            val pct = (copied.toFloat() / totalBytes.toFloat()).coerceIn(0f, 1f)
-                            val copiedMb = copied / (1024 * 1024)
-                            val totalMb = totalBytes / (1024 * 1024)
-                            onProgress(pct, "Copiati $copiedMb MB / $totalMb MB")
-                        } else {
-                            val copiedMb = copied / (1024 * 1024)
-                            onProgress(0.5f, "Copiati $copiedMb MB...")
+            var copySucceeded = false
+            try {
+                val stream = openStream() ?: throw IllegalStateException("Impossibile aprire lo stream del file selezionato.")
+                stream.use { input ->
+                    FileOutputStream(tempFile).use { output ->
+                        val buffer = ByteArray(256 * 1024) // 256 KB chunk: fast UFS copy with 4x lower peak heap
+                        var copied = 0L
+                        var read: Int
+                        while (input.read(buffer).also { read = it } != -1) {
+                            output.write(buffer, 0, read)
+                            copied += read
+                            if (totalBytes > 0) {
+                                val pct = (copied.toFloat() / totalBytes.toFloat()).coerceIn(0f, 1f)
+                                val copiedMb = copied / (1024 * 1024)
+                                val totalMb = totalBytes / (1024 * 1024)
+                                onProgress(pct, "Copiati $copiedMb MB / $totalMb MB")
+                            } else {
+                                val copiedMb = copied / (1024 * 1024)
+                                onProgress(0.5f, "Copiati $copiedMb MB...")
+                            }
                         }
+                        output.flush()
                     }
-                    output.flush()
                 }
-            } ?: throw IllegalStateException("Impossibile aprire lo stream del file selezionato.")
+
+                val finalSize = tempFile.length()
+                if (totalBytes >= 0 && finalSize != totalBytes) {
+                    throw IOException("Dimensione file incompleta: attesi $totalBytes byte, ricevuti $finalSize byte.")
+                }
+                if (finalSize == 0L) {
+                    throw IOException("Il file importato è vuoto (0 byte).")
+                }
+
+                replaceAtomically(tempFile, destFile)
+                copySucceeded = true
+            } finally {
+                if (!copySucceeded && tempFile.exists()) {
+                    tempFile.delete()
+                }
+            }
 
             val finalSize = destFile.length()
             val cleanTitle = displayName
@@ -399,19 +459,22 @@ class MobHarnRepository(
                 displayName.contains("_g5", ignoreCase = true) ||
                 displayName.contains("npu", ignoreCase = true)
 
+            val existingProfile = db.modelProfileDao().getModelByPath(destFile.absolutePath)
+
             // Lean & cool defaults: text-only (saves ~500MB VRAM until user toggles Vision),
             // 6K context (fits dynamic tools with low KV-cache RAM), and Chain of Thought enabled with eco budget.
             val profile = ModelProfileEntity(
+                id = existingProfile?.id ?: 0,
                 displayName = cleanTitle,
                 filePath = destFile.absolutePath,
                 fileSizeBytes = finalSize,
-                supportsVision = false,
-                preferredBackend = if (npuLikely) "NPU" else "GPU",
-                maxNumTokens = 6144,
-                temperature = 0.7f,
-                topK = 64,
-                topP = 0.95f,
-                thinkingEnabled = true
+                supportsVision = existingProfile?.supportsVision ?: false,
+                preferredBackend = existingProfile?.preferredBackend ?: if (npuLikely) "NPU" else "GPU",
+                maxNumTokens = existingProfile?.maxNumTokens ?: 6144,
+                temperature = existingProfile?.temperature ?: 0.7f,
+                topK = existingProfile?.topK ?: 64,
+                topP = existingProfile?.topP ?: 0.95f,
+                thinkingEnabled = existingProfile?.thinkingEnabled ?: true
             )
             val id = db.modelProfileDao().upsertModel(profile)
             val saved = profile.copy(id = id)
@@ -419,6 +482,11 @@ class MobHarnRepository(
             onProgress(1f, "Modello importato con successo!")
             saved
         }
+    }
+
+    private fun replaceAtomically(source: File, target: File) {
+        // Same directory, POSIX rename on Android: replace in one step or leave the old file intact.
+        if (!source.renameTo(target)) throw IOException("Impossibile sostituire il modello importato.")
     }
 
     companion object {

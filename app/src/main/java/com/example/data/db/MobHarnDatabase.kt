@@ -18,8 +18,8 @@ import androidx.room.RoomDatabase
         ToolExecutionLogEntity::class,
         CustomToolEntity::class
     ],
-    version = 2,
-    exportSchema = false
+    version = 3,
+    exportSchema = true
 )
 abstract class MobHarnDatabase : RoomDatabase() {
     abstract fun chatDao(): ChatDao
@@ -32,6 +32,12 @@ abstract class MobHarnDatabase : RoomDatabase() {
     abstract fun customToolDao(): CustomToolDao
 
     companion object {
+        val MIGRATION_2_3 = object : androidx.room.migration.Migration(2, 3) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL("CREATE INDEX index_chat_messages_sessionId_timestamp_id ON chat_messages(sessionId, timestamp, id)")
+            }
+        }
+
         @Volatile
         private var INSTANCE: MobHarnDatabase? = null
 
@@ -42,7 +48,7 @@ abstract class MobHarnDatabase : RoomDatabase() {
                     MobHarnDatabase::class.java,
                     "mobharn.db"
                 )
-                    .fallbackToDestructiveMigration(dropAllTables = true)
+                    .addMigrations(MIGRATION_2_3)
                     .build()
                     .also { INSTANCE = it }
             }

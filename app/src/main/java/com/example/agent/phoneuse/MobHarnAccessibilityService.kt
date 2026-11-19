@@ -141,17 +141,46 @@ class MobHarnAccessibilityService : AccessibilityService() {
 
     fun typeText(fieldHint: String, textToType: String): String {
         val root = rootInActiveWindow ?: return "Nessuna finestra attiva accessibile."
-        val target: AccessibilityNodeInfo = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
-            ?: (if (fieldHint.isNotBlank()) findEditableByQuery(root, fieldHint.trim()) else findFirstEditable(root))
-            ?: return "Nessun campo di testo modificabile trovato sullo schermo."
+        return typeTextInternal(root, fieldHint, textToType)
+    }
 
-        target.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+    internal fun typeTextInternal(
+        root: AccessibilityNodeInfo,
+        fieldHint: String,
+        textToType: String,
+        actionPerformer: ((AccessibilityNodeInfo, Int, Bundle?) -> Boolean)? = null,
+        focusedNodeResolver: ((AccessibilityNodeInfo) -> AccessibilityNodeInfo?)? = null
+    ): String {
+        val target: AccessibilityNodeInfo = if (fieldHint.isNotBlank()) {
+            findEditableByQuery(root, fieldHint.trim())
+                ?: return "Campo di testo '$fieldHint' non trovato sullo schermo."
+        } else {
+            val focused = focusedNodeResolver?.invoke(root)
+                ?: root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            focused ?: findFirstEditable(root)
+                ?: return "Nessun campo di testo modificabile trovato sullo schermo."
+        }
+
+        if (actionPerformer != null) {
+            actionPerformer(target, AccessibilityNodeInfo.ACTION_FOCUS, null)
+        } else {
+            target.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+        }
+
         val args = Bundle().apply {
             putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, textToType)
         }
-        val ok = target.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
-        return if (ok) "Testo inserito nel campo (${textToType.take(60)})."
-        else "Impossibile scrivere nel campo selezionato."
+        val ok = if (actionPerformer != null) {
+            actionPerformer(target, AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+        } else {
+            target.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+        }
+        return if (ok) {
+            val fieldDesc = if (fieldHint.isNotBlank()) "'$fieldHint'" else "attivo"
+            "Testo inserito nel campo $fieldDesc."
+        } else {
+            "Impossibile scrivere nel campo selezionato."
+        }
     }
 
     suspend fun scrollScreen(direction: String): String {
@@ -243,7 +272,7 @@ class MobHarnAccessibilityService : AccessibilityService() {
         return match
     }
 
-    private fun findEditableByQuery(root: AccessibilityNodeInfo, query: String): AccessibilityNodeInfo? {
+    internal fun findEditableByQuery(root: AccessibilityNodeInfo, query: String): AccessibilityNodeInfo? {
         var match: AccessibilityNodeInfo? = null
         fun walk(node: AccessibilityNodeInfo?) {
             if (node == null || match != null) return
@@ -251,7 +280,8 @@ class MobHarnAccessibilityService : AccessibilityService() {
                 val hint = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) node.hintText?.toString().orEmpty() else ""
                 val text = node.text?.toString().orEmpty()
                 val desc = node.contentDescription?.toString().orEmpty()
-                if (hint.contains(query, true) || text.contains(query, true) || desc.contains(query, true)) {
+                val viewId = node.viewIdResourceName?.toString().orEmpty()
+                if (hint.contains(query, true) || text.contains(query, true) || desc.contains(query, true) || viewId.contains(query, true)) {
                     match = node
                     return
                 }
@@ -259,10 +289,10 @@ class MobHarnAccessibilityService : AccessibilityService() {
             for (i in 0 until node.childCount) walk(node.getChild(i))
         }
         walk(root)
-        return match ?: findFirstEditable(root)
+        return match
     }
 
-    private fun findFirstEditable(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+    internal fun findFirstEditable(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
         var match: AccessibilityNodeInfo? = null
         fun walk(node: AccessibilityNodeInfo?) {
             if (node == null || match != null) return
@@ -280,6 +310,10 @@ class MobHarnAccessibilityService : AccessibilityService() {
         @Volatile
         var instance: MobHarnAccessibilityService? = null
             private set
+
+        internal fun setTestInstance(testService: MobHarnAccessibilityService?) {
+            instance = testService
+        }
 
         private val _isConnected = MutableStateFlow(false)
         val isConnected: StateFlow<Boolean> = _isConnected.asStateFlow()
