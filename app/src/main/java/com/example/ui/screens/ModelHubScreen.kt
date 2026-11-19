@@ -22,11 +22,16 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
+import java.io.File
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -228,6 +233,73 @@ fun ModelHubScreen(
                 }
             }
 
+            // Diagnostic Error Card when LiteRT-LM fails to initialize
+            if (engineStatus is EngineStatus.Error) {
+                val errState = engineStatus as EngineStatus.Error
+                item {
+                    val clipboard = LocalClipboardManager.current
+                    Card(
+                        shape = RoundedCornerShape(22.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.errorContainer
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Icon(
+                                        Icons.Default.ErrorOutline,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.onErrorContainer
+                                    )
+                                    Text(
+                                        "Diagnostica LiteRT-LM",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        color = MaterialTheme.colorScheme.onErrorContainer
+                                    )
+                                }
+                                IconButton(
+                                    onClick = {
+                                        clipboard.setText(AnnotatedString("${errState.message}\n\n${errState.detail}"))
+                                        onShowMessage("Diagnostica copiata negli appunti")
+                                    }
+                                ) {
+                                    Icon(
+                                        Icons.Default.ContentCopy,
+                                        contentDescription = "Copia diagnostica",
+                                        tint = MaterialTheme.colorScheme.onErrorContainer
+                                    )
+                                }
+                            }
+                            Text(
+                                errState.message,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onErrorContainer
+                            )
+                            if (errState.detail.isNotBlank()) {
+                                Text(
+                                    errState.detail,
+                                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = JetBrainsMonoFontFamily),
+                                    color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.9f)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
             // Imported Model Profiles
             item {
                 Text("Profili Modello Locali (${models.size})", style = MaterialTheme.typography.titleSmall)
@@ -340,6 +412,11 @@ private fun ModelProfileCard(
                 Column(modifier = Modifier.weight(1f)) {
                     Text(profile.displayName, style = MaterialTheme.typography.titleMedium)
                     Text(
+                        File(profile.filePath).name,
+                        style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMonoFontFamily),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
                         String.format(Locale.US, "%.2f GB • %s • Context %d", sizeGb, profile.preferredBackend, profile.maxNumTokens),
                         style = MaterialTheme.typography.labelSmall,
                         color = if (isLoaded) StatusSuccess else MaterialTheme.colorScheme.onSurfaceVariant
@@ -350,25 +427,29 @@ private fun ModelProfileCard(
                 }
             }
 
-            // Backend & Vision toggles
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                listOf("GPU", "CPU").forEach { backend ->
+            // Backend & Vision toggles (NPU Tensor G5, GPU, CPU)
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                items(listOf("NPU", "GPU", "CPU")) { backend ->
                     FilterChip(
-                        selected = profile.preferredBackend == backend,
+                        selected = profile.preferredBackend.equals(backend, ignoreCase = true),
                         onClick = { onUpdate(profile.copy(preferredBackend = backend)) },
-                        label = { Text(backend) }
+                        label = { Text(if (backend == "NPU") "NPU Tensor" else backend) }
                     )
                 }
-                FilterChip(
-                    selected = profile.supportsVision,
-                    onClick = { onUpdate(profile.copy(supportsVision = !profile.supportsVision)) },
-                    label = { Text("Visione") }
-                )
-                FilterChip(
-                    selected = profile.thinkingEnabled,
-                    onClick = { onUpdate(profile.copy(thinkingEnabled = !profile.thinkingEnabled)) },
-                    label = { Text("Thinking") }
-                )
+                item {
+                    FilterChip(
+                        selected = profile.supportsVision,
+                        onClick = { onUpdate(profile.copy(supportsVision = !profile.supportsVision)) },
+                        label = { Text("Visione") }
+                    )
+                }
+                item {
+                    FilterChip(
+                        selected = profile.thinkingEnabled,
+                        onClick = { onUpdate(profile.copy(thinkingEnabled = !profile.thinkingEnabled)) },
+                        label = { Text("Thinking") }
+                    )
+                }
             }
 
             // Context Window Chips

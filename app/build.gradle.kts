@@ -63,6 +63,12 @@ android {
     compose = true
     buildConfig = true
   }
+  packaging {
+    jniLibs {
+      // Required so LiteRT NPU Backend.NPU(nativeLibraryDir) can discover libLiteRtDispatch_GoogleTensor.so on disk
+      useLegacyPackaging = true
+    }
+  }
   testOptions { unitTests { isIncludeAndroidResources = true } }
   dependenciesInfo {
     includeInApk = false
@@ -119,6 +125,7 @@ dependencies {
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
   implementation(libs.litertlm.android)
+  implementation(libs.litert.npu.google.tensor)
   // implementation(libs.logging.interceptor)
   // implementation(libs.moshi.kotlin)
   implementation(libs.okhttp)

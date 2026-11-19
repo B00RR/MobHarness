@@ -381,13 +381,17 @@ class HermesRepository(
                 displayName.contains("gemma4", ignoreCase = true) ||
                 displayName.contains("vision", ignoreCase = true)
 
+            val npuLikely = displayName.contains("tensor", ignoreCase = true) ||
+                displayName.contains("_g5", ignoreCase = true) ||
+                displayName.contains("npu", ignoreCase = true)
+
             val profile = ModelProfileEntity(
                 displayName = cleanTitle,
                 filePath = destFile.absolutePath,
                 fileSizeBytes = finalSize,
                 supportsVision = visionLikely,
-                preferredBackend = "GPU",
-                maxNumTokens = 8192,
+                preferredBackend = if (npuLikely) "NPU" else "GPU",
+                maxNumTokens = 4096,
                 temperature = 0.7f,
                 topK = 64,
                 topP = 0.95f,

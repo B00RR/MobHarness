@@ -41,6 +41,7 @@ googleServices = "4.5.0"
 credentials = "1.5.0"
 googleid = "1.1.1"
 litertlmAndroid = "latest.release"
+litertNpuGoogleTensor = "latest.release"
 workRuntimeKtx = "2.10.0"
 
 
@@ -97,6 +98,7 @@ androidx-credentials = { group = "androidx.credentials", name = "credentials", v
 androidx-credentials-play-services = { group = "androidx.credentials", name = "credentials-play-services-auth", version.ref = "credentials" }
 googleid = { group = "com.google.android.libraries.identity.googleid", name = "googleid", version.ref = "googleid" }
 litertlm-android = { group = "com.google.ai.edge.litertlm", name = "litertlm-android", version.ref = "litertlmAndroid" }
+litert-npu-google-tensor = { group = "com.google.ai.edge.litert", name = "litert-npu-runtime-google-tensor", version.ref = "litertNpuGoogleTensor" }
 androidx-work-runtime-ktx = { group = "androidx.work", name = "work-runtime-ktx", version.ref = "workRuntimeKtx" }
 
 
