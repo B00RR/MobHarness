@@ -18,6 +18,11 @@ data class VaultDocuments(
     val estimatedSystemTokens: Int
 )
 
+data class SessionCheckpoint(
+    val digest: String,
+    val lastSummarizedMessageId: Long = 0L
+)
+
 class MarkdownVaultManager(context: Context) {
 
     private val vaultDir: File = File(context.filesDir, "mobharn_vault").apply { mkdirs() }
@@ -59,19 +64,51 @@ class MarkdownVaultManager(context: Context) {
         memoryFile.writeText(content)
     }
 
-    suspend fun readSessionDigest(sessionId: Long): String = withContext(Dispatchers.IO) {
-        if (sessionId <= 0L) return@withContext ""
+    suspend fun readSessionCheckpoint(sessionId: Long): SessionCheckpoint = withContext(Dispatchers.IO) {
+        if (sessionId <= 0L) return@withContext SessionCheckpoint("", 0L)
         val file = File(sessionsDir, "session_$sessionId.md")
-        if (file.exists()) file.readText() else ""
+        if (!file.exists()) return@withContext SessionCheckpoint("", 0L)
+        val raw = file.readText()
+        val match = CHECKPOINT_HEADER_REGEX.find(raw)
+        val lastId = match?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+        val cleanDigest = if (match != null) {
+            raw.substring(match.range.last + 1).trim()
+        } else {
+            raw.trim()
+        }
+        SessionCheckpoint(digest = cleanDigest, lastSummarizedMessageId = lastId)
     }
 
-    suspend fun writeSessionDigest(sessionId: Long, digest: String) = withContext(Dispatchers.IO) {
+    suspend fun readSessionDigest(sessionId: Long): String =
+        readSessionCheckpoint(sessionId).digest
+
+    suspend fun writeSessionDigest(
+        sessionId: Long,
+        digest: String,
+        lastSummarizedMessageId: Long = 0L
+    ) = withContext(Dispatchers.IO) {
         if (sessionId <= 0L) return@withContext
         val file = File(sessionsDir, "session_$sessionId.md")
         if (digest.isBlank()) {
             if (file.exists()) file.delete()
         } else {
-            file.writeText(digest.trim())
+            val headerMatch = CHECKPOINT_HEADER_REGEX.find(digest)
+            val effectiveId = if (lastSummarizedMessageId > 0L) {
+                lastSummarizedMessageId
+            } else {
+                headerMatch?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+            }
+            val body = if (headerMatch != null) {
+                digest.substring(headerMatch.range.last + 1).trim()
+            } else {
+                digest.trim()
+            }
+            val content = if (effectiveId > 0L) {
+                "<!-- checkpoint: lastSummarizedMessageId=$effectiveId -->\n$body"
+            } else {
+                body
+            }
+            file.writeText(content)
         }
     }
 
@@ -232,6 +269,10 @@ class MarkdownVaultManager(context: Context) {
     companion object {
         const val GENERATED_SECTION_START = "<!-- MOBHARN_GENERATED_START -->"
         const val GENERATED_SECTION_END = "<!-- MOBHARN_GENERATED_END -->"
+        val CHECKPOINT_HEADER_REGEX = Regex(
+            """^<!--\s*(?:checkpoint:\s*)?(?:lastSummarizedMessageId|last_summarized_id|lastSummarizedId)\s*[:=]\s*(\d+)\s*-->\s*""",
+            RegexOption.IGNORE_CASE
+        )
 
         val DEFAULT_SOUL_MD = """
             # SOUL.md — Identità di MobHarn

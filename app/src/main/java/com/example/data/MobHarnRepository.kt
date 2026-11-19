@@ -17,6 +17,7 @@ import com.example.data.db.WorkspaceSnapshotEntity
 import com.example.data.prefs.AppPreferences
 import com.example.data.prefs.PreferencesRepository
 import com.example.data.vault.MarkdownVaultManager
+import com.example.data.vault.SessionCheckpoint
 import com.example.data.vault.VaultDocuments
 import com.example.data.workspace.WorkspaceManager
 import kotlinx.coroutines.Dispatchers
@@ -114,7 +115,18 @@ class MobHarnRepository(
     fun observeMessages(sessionId: Long): Flow<List<ChatMessageEntity>> =
         db.chatDao().observeMessages(sessionId)
 
-    suspend fun getMessages(sessionId: Long): List<ChatMessageEntity> =
+    suspend fun getMessages(
+        sessionId: Long,
+        afterMessageId: Long = 0L,
+        recentLimit: Int = 20
+    ): List<ChatMessageEntity> =
+        if (afterMessageId <= 0L && recentLimit >= 1000) {
+            db.chatDao().getMessages(sessionId)
+        } else {
+            db.chatDao().getMessages(sessionId, afterMessageId, recentLimit)
+        }
+
+    suspend fun getAllMessages(sessionId: Long): List<ChatMessageEntity> =
         db.chatDao().getMessages(sessionId)
 
     suspend fun createSession(title: String, projectName: String): Long =
@@ -127,9 +139,15 @@ class MobHarnRepository(
         vault.deleteSessionDigest(sessionId)
     }
 
+    suspend fun getSessionCheckpoint(sessionId: Long): SessionCheckpoint = vault.readSessionCheckpoint(sessionId)
+
     suspend fun getSessionDigest(sessionId: Long): String = vault.readSessionDigest(sessionId)
 
-    suspend fun saveSessionDigest(sessionId: Long, digest: String) = vault.writeSessionDigest(sessionId, digest)
+    suspend fun saveSessionDigest(
+        sessionId: Long,
+        digest: String,
+        lastSummarizedMessageId: Long = 0L
+    ) = vault.writeSessionDigest(sessionId, digest, lastSummarizedMessageId)
 
     suspend fun addMessage(message: ChatMessageEntity): Long = db.chatDao().insertMessage(message)
 

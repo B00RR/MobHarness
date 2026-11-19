@@ -33,6 +33,26 @@ interface ChatDao {
     )
     fun observeMessages(sessionId: Long): Flow<List<ChatMessageEntity>>
 
+    @Query(
+        """
+        SELECT * FROM (
+            SELECT * FROM chat_messages
+            WHERE sessionId = :sessionId
+              AND (id > :afterMessageId OR id IN (
+                  SELECT id FROM chat_messages
+                  WHERE sessionId = :sessionId
+                  ORDER BY timestamp DESC, id DESC
+                  LIMIT :recentLimit
+              ))
+        ) ORDER BY timestamp ASC, id ASC
+        """
+    )
+    suspend fun getMessages(
+        sessionId: Long,
+        afterMessageId: Long,
+        recentLimit: Int
+    ): List<ChatMessageEntity>
+
     @Query("SELECT * FROM chat_messages WHERE sessionId = :sessionId ORDER BY timestamp ASC, id ASC")
     suspend fun getMessages(sessionId: Long): List<ChatMessageEntity>
 

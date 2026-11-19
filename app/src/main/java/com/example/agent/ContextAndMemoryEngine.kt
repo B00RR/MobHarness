@@ -20,7 +20,8 @@ data class ContextWindowPlan(
     val compactedTurnCount: Int,
     val estimatedPromptTokens: Int,
     val maxContextTokens: Int,
-    val perMessageCharLimit: Int
+    val perMessageCharLimit: Int,
+    val lastSummarizedMessageId: Long = 0L
 )
 
 /**
@@ -254,6 +255,19 @@ object ContextAndMemoryEngine {
     }
 
     /**
+     * Computes the adaptive verbatim hot-window depth based on max context tokens.
+     */
+    fun getHotTurnCount(maxContextTokens: Int): Int {
+        val safeMax = maxContextTokens.coerceIn(2048, 32768)
+        return when {
+            safeMax >= 24576 -> 14 // 7 full user+assistant exchanges verbatim
+            safeMax >= 14336 -> 10 // 5 full exchanges verbatim
+            safeMax >= 7168 -> 8   // 4 full exchanges verbatim
+            else -> 4              // 2 full exchanges verbatim (4K mobile safe)
+        }
+    }
+
+    /**
      * Builds the adaptive 3-tier mobile context plan for a session:
      * - Scales verbatim hot-window depth & per-turn char budget to `maxContextTokens`.
      * - Automatically compacts overflow older turns into a dense rolling `SessionDigest`
@@ -263,17 +277,13 @@ object ContextAndMemoryEngine {
         allPriorMessages: List<ChatMessageEntity>,
         existingDigest: String,
         maxContextTokens: Int,
-        forceCompaction: Boolean = false
+        forceCompaction: Boolean = false,
+        lastSummarizedMessageId: Long = 0L
     ): ContextWindowPlan {
         val safeMax = maxContextTokens.coerceIn(2048, 32768)
 
         // Adaptive window depth & char budget scaled to the active model context window
-        val hotTurnCount = when {
-            safeMax >= 24576 -> 14 // 7 full user+assistant exchanges verbatim
-            safeMax >= 14336 -> 10 // 5 full exchanges verbatim
-            safeMax >= 7168 -> 8   // 4 full exchanges verbatim
-            else -> 4              // 2 full exchanges verbatim (4K mobile safe)
-        }
+        val hotTurnCount = getHotTurnCount(safeMax)
         val perMessageCharLimit = when {
             safeMax >= 24576 -> 1600
             safeMax >= 14336 -> 1100
@@ -306,15 +316,28 @@ object ContextAndMemoryEngine {
             emptyList<ChatMessageEntity>() to allPriorMessages
         }
 
-        val updatedDigest = if (olderMessages.isNotEmpty()) {
+        // Only compact older messages that have not yet been summarized
+        val uncompactedOlder = if (lastSummarizedMessageId > 0L) {
+            olderMessages.filter { it.id > lastSummarizedMessageId }
+        } else {
+            olderMessages
+        }
+
+        val updatedDigest = if (uncompactedOlder.isNotEmpty()) {
             buildCompactedSessionDigest(
                 previousDigest = existingDigest,
-                olderMessages = olderMessages,
-                maxChars = digestCharBudget
+                olderMessages = uncompactedOlder,
+                maxChars = digestCharBudget,
+                lastSummarizedMessageId = lastSummarizedMessageId
             )
         } else {
             existingDigest.take(digestCharBudget)
         }
+
+        val newLastSummarizedId = maxOf(
+            lastSummarizedMessageId,
+            uncompactedOlder.maxOfOrNull { it.id } ?: lastSummarizedMessageId
+        )
 
         val hotPairs = hotMessages.map { msg ->
             msg.role to compactSingleMessage(msg.content, perMessageCharLimit)
@@ -327,11 +350,12 @@ object ContextAndMemoryEngine {
         return ContextWindowPlan(
             hotHistoryPairs = hotPairs,
             updatedSessionDigest = updatedDigest,
-            didAutoCompact = olderMessages.isNotEmpty(),
-            compactedTurnCount = olderMessages.size,
+            didAutoCompact = uncompactedOlder.isNotEmpty(),
+            compactedTurnCount = uncompactedOlder.size,
             estimatedPromptTokens = estTokens,
             maxContextTokens = safeMax,
-            perMessageCharLimit = perMessageCharLimit
+            perMessageCharLimit = perMessageCharLimit,
+            lastSummarizedMessageId = newLastSummarizedId
         )
     }
 
@@ -343,9 +367,15 @@ object ContextAndMemoryEngine {
     fun buildCompactedSessionDigest(
         previousDigest: String,
         olderMessages: List<ChatMessageEntity>,
-        maxChars: Int = 1600
+        maxChars: Int = 1600,
+        lastSummarizedMessageId: Long = 0L
     ): String {
-        if (olderMessages.isEmpty()) return previousDigest.take(maxChars)
+        val unsummarized = if (lastSummarizedMessageId > 0L) {
+            olderMessages.filter { it.id > lastSummarizedMessageId }
+        } else {
+            olderMessages
+        }
+        if (unsummarized.isEmpty()) return previousDigest.take(maxChars)
 
         val userGoals = mutableListOf<String>()
         val keyOutcomes = mutableListOf<String>()
@@ -366,7 +396,7 @@ object ContextAndMemoryEngine {
                 }
         }
 
-        for (msg in olderMessages) {
+        for (msg in unsummarized) {
             val clean = msg.content.replace(Regex("\\s+"), " ").trim()
             if (clean.isBlank()) continue
 
