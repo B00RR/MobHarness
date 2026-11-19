@@ -6,65 +6,78 @@ import android.app.NotificationManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.Process
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import com.example.R
+import com.example.agent.ThermalAndMemoryGuard
+import com.example.agent.ThermalLevel
 import com.example.agent.tools.AndroidSystemActions
 import com.example.data.db.MobHarnDatabase
 import com.example.data.vault.MarkdownVaultManager
 import com.example.data.workspace.WorkspaceManager
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 class AutomationWorker(
     appContext: Context,
     params: WorkerParameters
 ) : CoroutineWorker(appContext, params) {
 
-    override suspend fun doWork(): Result {
+    override suspend fun doWork(): Result = withContext(Dispatchers.Default) {
+        // Strictly pin background automation threads to efficiency/LITTLE cores so user foreground apps never stutter
+        runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_LOWEST) }
+
         val taskId = inputData.getLong(KEY_TASK_ID, -1L)
-        if (taskId <= 0L) return Result.failure()
+        if (taskId <= 0L) return@withContext Result.failure()
 
         val isManual = inputData.getBoolean(KEY_MANUAL_RUN, false)
-        val pm = applicationContext.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
-        if (!isManual && runCatching { pm.isPowerSaveMode }.getOrDefault(false)) {
-            return Result.success()
+        val snap = runCatching { ThermalAndMemoryGuard.readSnapshot(applicationContext) }.getOrNull()
+        if (!isManual && snap != null) {
+            if (snap.isPowerSaveMode) return@withContext Result.success()
+            if (snap.thermalLevel == ThermalLevel.HOT || snap.thermalLevel == ThermalLevel.CRITICAL || snap.isLowMemory) {
+                return@withContext Result.retry()
+            }
         }
 
         val db = MobHarnDatabase.getInstance(applicationContext)
-        val task = db.automationDao().getTaskById(taskId) ?: return Result.success()
+        val task = db.automationDao().getTaskById(taskId) ?: return@withContext Result.success()
         val system = AndroidSystemActions(applicationContext)
         val vault = MarkdownVaultManager(applicationContext)
         val workspace = WorkspaceManager(applicationContext)
 
-        val resultSummary = runCatching {
-            when (task.actionType) {
-                "TELEMETRY_CHECK" -> system.getTelemetryReport()
-                "WEB_MONITOR" -> {
-                    if (task.targetUrl.isNotBlank()) system.fetchWebpage(task.targetUrl, 1200)
-                    else system.webSearch(task.prompt)
-                }
-                "MEMORY_DIGEST" -> {
-                    val docs = vault.readVault()
-                    val memories = db.memoryDao().getAllMemories()
-                    "Digest memoria: ${memories.size} fatti persistenti (~${docs.estimatedSystemTokens} tok nel prompt di sistema)."
-                }
-                "WORKSPACE_AUDIT" -> {
-                    val projects = workspace.listProjects()
-                    val summary = projects.joinToString("\n") { p ->
-                        "• $p"
+        val resultSummary = try {
+            runCatching {
+                when (task.actionType) {
+                    "TELEMETRY_CHECK" -> system.getTelemetryReport()
+                    "WEB_MONITOR" -> {
+                        if (task.targetUrl.isNotBlank()) system.fetchWebpage(task.targetUrl, 1200)
+                        else system.webSearch(task.prompt)
                     }
-                    "Audit Coding Workspace (${projects.size} progetti):\n$summary"
+                    "MEMORY_DIGEST" -> {
+                        val docs = vault.readVault()
+                        val memories = db.memoryDao().getAllMemories()
+                        "Digest memoria: ${memories.size} fatti persistenti (~${docs.estimatedSystemTokens} tok nel prompt di sistema)."
+                    }
+                    "WORKSPACE_AUDIT" -> {
+                        val projects = workspace.listProjects()
+                        val summary = projects.joinToString("\n") { p -> "• $p" }
+                        "Audit Coding Workspace (${projects.size} progetti):\n$summary"
+                    }
+                    else -> { // BRIEFING
+                        val hw = system.getHardwareSummary()
+                        val memCount = db.memoryDao().getAllMemories().size
+                        "Briefing MobHarn: Batteria ${hw.batteryPercent}%, RAM libera ${"%.1f".format(hw.availableRamGb)} GB, Rete ${hw.networkStatus}, $memCount memorie attive. Prompt: ${task.prompt}"
+                    }
                 }
-                else -> { // BRIEFING
-                    val hw = system.getHardwareSummary()
-                    val memCount = db.memoryDao().getAllMemories().size
-                    "Briefing MobHarn: Batteria ${hw.batteryPercent}%, RAM libera ${"%.1f".format(hw.availableRamGb)} GB, Rete ${hw.networkStatus}, $memCount memorie attive. Prompt: ${task.prompt}"
-                }
+            }.getOrElse { e ->
+                "Errore durante automazione '${task.name}': ${e.message}"
             }
-        }.getOrElse { e ->
-            "Errore durante automazione '${task.name}': ${e.message}"
+        } finally {
+            system.evictIdleConnections()
         }
 
         db.automationDao().updateRunResult(
@@ -74,7 +87,7 @@ class AutomationWorker(
         )
 
         postCompletionNotification(task.id.toInt(), task.name, resultSummary.take(180))
-        return Result.success()
+        Result.success()
     }
 
     private fun postCompletionNotification(id: Int, title: String, body: String) {

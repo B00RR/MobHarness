@@ -5,15 +5,18 @@ import android.net.Uri
 import android.os.SystemClock
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.agent.ContextAndMemoryEngine
 import com.example.agent.EngineStatus
 import com.example.agent.ThermalAndMemoryGuard
 import com.example.agent.tools.PendingToolApproval
+import com.example.agent.tools.ToolCallRecoveryParser
 import com.example.agent.tools.ToolCallTrace
 import com.example.agent.tools.encodeToolTracesToJson
 import com.example.data.db.AgentSkillEntity
 import com.example.data.db.ChatMessageEntity
 import com.example.data.db.ChatSessionEntity
 import com.example.data.prefs.AppPreferences
+import com.example.data.prefs.ToolGroup
 import com.example.di.MobHarnAppContainer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -50,7 +53,11 @@ data class ChatUiState(
     val quickSandboxBanner: String? = null,
     val estimatedMemoryTokens: Int = 0,
     val generationStartedAtMs: Long = 0L,
-    val thinkingDurationSec: Int = 0
+    val thinkingDurationSec: Int = 0,
+    val contextTokensUsed: Int = 0,
+    val contextTokensMax: Int = 8192,
+    val hasSessionDigest: Boolean = false,
+    val autoCompactedTurnCount: Int = 0
 )
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -105,7 +112,15 @@ class ChatViewModel(
         viewModelScope.launch {
             sessions.collect { list ->
                 if (list.isNotEmpty() && _uiState.value.activeSessionId <= 0L) {
-                    _uiState.update { it.copy(activeSessionId = list.first().id) }
+                    val firstSession = list.first()
+                    val hasDigest = repo.getSessionDigest(firstSession.id).isNotBlank()
+                    _uiState.update {
+                        it.copy(
+                            activeSessionId = firstSession.id,
+                            contextTokensUsed = firstSession.estimatedTokens,
+                            hasSessionDigest = hasDigest
+                        )
+                    }
                 }
             }
         }
@@ -127,6 +142,7 @@ class ChatViewModel(
     fun selectSession(sessionId: Long) {
         if (sessionId == _uiState.value.activeSessionId) return
         stopGeneration()
+        val targetSession = sessions.value.firstOrNull { it.id == sessionId }
         _uiState.update {
             it.copy(
                 activeSessionId = sessionId,
@@ -135,10 +151,15 @@ class ChatViewModel(
                 liveToolTraces = emptyList(),
                 liveThermalNote = null,
                 generationStartedAtMs = 0L,
-                thinkingDurationSec = 0
+                thinkingDurationSec = 0,
+                contextTokensUsed = targetSession?.estimatedTokens ?: 0,
+                hasSessionDigest = false,
+                autoCompactedTurnCount = 0
             )
         }
         viewModelScope.launch {
+            val hasDigest = repo.getSessionDigest(sessionId).isNotBlank()
+            _uiState.update { it.copy(hasSessionDigest = hasDigest) }
             runtime.resetConversation()
         }
     }
@@ -157,7 +178,10 @@ class ChatViewModel(
                     liveThermalNote = null,
                     attachedImagePath = null,
                     generationStartedAtMs = 0L,
-                    thinkingDurationSec = 0
+                    thinkingDurationSec = 0,
+                    contextTokensUsed = 0,
+                    hasSessionDigest = false,
+                    autoCompactedTurnCount = 0
                 )
             }
             runtime.resetConversation()
@@ -291,18 +315,61 @@ class ChatViewModel(
         val sessionId = _uiState.value.activeSessionId
         if (sessionId <= 0L) return
         viewModelScope.launch {
-            runtime.resetConversation()
+            val activeMaxCtx = (engineStatus.value as? EngineStatus.Ready)?.model?.maxNumTokens
+                ?: _uiState.value.contextTokensMax
             val msgs = repo.getMessages(sessionId)
-            if (msgs.size >= 4) {
-                val digest = msgs.takeLast(4).joinToString(" | ") { "${it.role}: ${it.content.take(90)}" }
+            val existingDigest = repo.getSessionDigest(sessionId)
+            val plan = withContext(Dispatchers.Default) {
+                ContextAndMemoryEngine.buildContextWindowPlan(
+                    allPriorMessages = msgs,
+                    existingDigest = existingDigest,
+                    maxContextTokens = activeMaxCtx,
+                    forceCompaction = true
+                )
+            }
+
+            if (plan.updatedSessionDigest.isNotBlank()) {
+                repo.saveSessionDigest(sessionId, plan.updatedSessionDigest)
+            }
+            if (msgs.size >= 4 && plan.updatedSessionDigest.isNotBlank()) {
+                val firstLine = plan.updatedSessionDigest
+                    .lines()
+                    .firstOrNull { it.startsWith("- ") }
+                    ?.removePrefix("- ")
+                    ?.take(180)
+                    ?: plan.updatedSessionDigest.take(180)
                 repo.upsertMemoryAndSync(
-                    category = "FACT",
+                    category = "PROJECT",
                     keyName = "riepilogo_sessione_$sessionId",
-                    content = digest,
+                    content = firstLine,
                     importance = 3
                 )
             }
-            _events.tryEmit("Contesto KV liberato e sincronizzato con MEMORY.md.")
+
+            runtime.resetConversation()
+            sessions.value.firstOrNull { it.id == sessionId }?.let { session ->
+                repo.updateSession(
+                    session.copy(
+                        estimatedTokens = plan.estimatedPromptTokens,
+                        updatedAt = System.currentTimeMillis()
+                    )
+                )
+            }
+            _uiState.update {
+                it.copy(
+                    contextTokensUsed = plan.estimatedPromptTokens,
+                    contextTokensMax = plan.maxContextTokens,
+                    hasSessionDigest = plan.updatedSessionDigest.isNotBlank(),
+                    autoCompactedTurnCount = plan.compactedTurnCount
+                )
+            }
+            _events.tryEmit(
+                if (plan.compactedTurnCount > 0) {
+                    "Contesto compattato: ${plan.compactedTurnCount} turni sintetizzati nel checkpoint di sessione."
+                } else {
+                    "Cache KV liberata e pronta per nuovi turni."
+                }
+            )
         }
     }
 
@@ -415,21 +482,56 @@ class ChatViewModel(
             var lastUiPushMs = 0L
             var thinkingStartMs = 0L
             var thinkingDoneSec = 0
-            val uiThrottleIntervalMs = 95L // ~10.5 UI refreshes/sec cuts UI CPU/GPU heat by ~80%
+            var latestContextUsed = _uiState.value.contextTokensUsed
+            var latestContextMax = ready.model.maxNumTokens.coerceIn(2048, 32768)
 
             try {
                 val routedGroups = container.toolkitRegistry.selectRoutedToolGroups(
                     userPrompt = prompt,
                     enabledGroups = currentPrefs.enabledToolGroups
                 )
-                val priorMessages = repo.getMessages(sessionId)
-                    .dropLast(1)
-                    .takeLast(4)
-                val recentHistoryPairs = priorMessages.map { it.role to it.content }
+                val allPriorMessages = repo.getMessages(sessionId).dropLast(1)
+                val existingDigest = repo.getSessionDigest(sessionId)
+
+                // Mobile 3-tier context plan: keeps verbatim hot turns + auto-compacts overflow into rolling checkpoint
+                val contextPlan = withContext(Dispatchers.Default) {
+                    ContextAndMemoryEngine.buildContextWindowPlan(
+                        allPriorMessages = allPriorMessages,
+                        existingDigest = existingDigest,
+                        maxContextTokens = latestContextMax
+                    )
+                }
+
+                val digestChanged = contextPlan.didAutoCompact &&
+                    contextPlan.updatedSessionDigest.isNotBlank() &&
+                    contextPlan.updatedSessionDigest != existingDigest
+                if (digestChanged) {
+                    repo.saveSessionDigest(sessionId, contextPlan.updatedSessionDigest)
+                    _uiState.update {
+                        it.copy(
+                            hasSessionDigest = true,
+                            autoCompactedTurnCount = contextPlan.compactedTurnCount,
+                            contextTokensUsed = contextPlan.estimatedPromptTokens,
+                            contextTokensMax = contextPlan.maxContextTokens
+                        )
+                    }
+                    _events.tryEmit("Auto-compattamento: ${contextPlan.compactedTurnCount} turni sintetizzati per mantenere il contesto fluido.")
+                } else {
+                    _uiState.update {
+                        it.copy(
+                            hasSessionDigest = contextPlan.updatedSessionDigest.isNotBlank(),
+                            contextTokensUsed = maxOf(it.contextTokensUsed, contextPlan.estimatedPromptTokens),
+                            contextTokensMax = contextPlan.maxContextTokens
+                        )
+                    }
+                }
 
                 val systemPrompt = container.promptAssembler.assemble(
                     activeProject = currentPrefs.activeProjectName,
-                    routedGroups = routedGroups
+                    routedGroups = routedGroups,
+                    recentContextDigest = contextPlan.updatedSessionDigest,
+                    userPrompt = prompt,
+                    contextBudgetTokens = latestContextMax
                 )
                 runtime.streamTurn(
                     sessionId = sessionId,
@@ -437,8 +539,11 @@ class ChatViewModel(
                     userPrompt = prompt,
                     imageFilePath = imagePath,
                     enabledToolGroups = routedGroups,
-                    recentHistory = recentHistoryPairs,
-                    ecoThermalMode = currentPrefs.ecoThermalMode
+                    recentHistory = contextPlan.hotHistoryPairs,
+                    ecoThermalMode = currentPrefs.ecoThermalMode,
+                    perMessageCharLimit = contextPlan.perMessageCharLimit,
+                    maxSeedMessages = contextPlan.hotHistoryPairs.size.coerceAtLeast(4),
+                    forceConversationReset = digestChanged
                 ).collect { chunk ->
                     val now = SystemClock.elapsedRealtime()
                     if (chunk.thinkingDelta.isNotEmpty()) {
@@ -452,8 +557,12 @@ class ChatViewModel(
                         visibleBuilder.append(chunk.visibleDelta)
                     }
                     finalTps = chunk.tokensPerSec
+                    if (chunk.contextTokensUsed > 0) latestContextUsed = chunk.contextTokensUsed
+                    if (chunk.contextTokensMax > 0) latestContextMax = chunk.contextTokensMax
 
-                    if (lastUiPushMs == 0L || now - lastUiPushMs >= uiThrottleIntervalMs) {
+                    // In background, slow down UI state pushes to ~2.8Hz so Compose does zero off-screen work
+                    val uiIntervalMs = if (runtime.isAppInBackground) 350L else 95L
+                    if (lastUiPushMs == 0L || now - lastUiPushMs >= uiIntervalMs) {
                         lastUiPushMs = now
                         val visSnap = visibleBuilder.toString()
                         val thinkSnap = thinkingBuilder.toString()
@@ -469,14 +578,27 @@ class ChatViewModel(
                                 liveTokensPerSec = chunk.tokensPerSec,
                                 liveTtftMs = chunk.ttftMs,
                                 liveThermalNote = chunk.thermalNote,
-                                thinkingDurationSec = currentThinkSec
+                                thinkingDurationSec = currentThinkSec,
+                                contextTokensUsed = latestContextUsed,
+                                contextTokensMax = latestContextMax
                             )
                         }
                     }
                 }
 
-                val finalText = visibleBuilder.toString().trim()
+                val cleanedVisible = ToolCallRecoveryParser.stripRawToolCallMarkup(visibleBuilder.toString()).trim()
+                val finalText = cleanedVisible
                     .ifBlank { if (traces.isNotEmpty()) "Strumenti eseguiti con successo." else "(risposta vuota)" }
+
+                // Continuous-learning safety net: if the user explicitly asked to remember/note a fact
+                // or learn/create a skill and the model forgot to invoke save_memory/save_skill, capture it!
+                captureExplicitLearningIfMissed(
+                    sessionId = sessionId,
+                    userPrompt = prompt,
+                    assistantReply = finalText,
+                    traces = traces
+                )
+
                 repo.addMessage(
                     ChatMessageEntity(
                         sessionId = sessionId,
@@ -487,8 +609,23 @@ class ChatViewModel(
                         tokensPerSec = finalTps
                     )
                 )
+                sessions.value.firstOrNull { it.id == sessionId }?.let { session ->
+                    repo.updateSession(
+                        session.copy(
+                            estimatedTokens = latestContextUsed.coerceAtLeast(contextPlan.estimatedPromptTokens),
+                            updatedAt = System.currentTimeMillis()
+                        )
+                    )
+                }
+                _uiState.update {
+                    it.copy(
+                        contextTokensUsed = latestContextUsed.coerceAtLeast(contextPlan.estimatedPromptTokens),
+                        contextTokensMax = latestContextMax
+                    )
+                }
+                refreshMemoryTokenEstimate()
             } catch (t: Throwable) {
-                val partial = visibleBuilder.toString().trim()
+                val partial = ToolCallRecoveryParser.stripRawToolCallMarkup(visibleBuilder.toString()).trim()
                 val errText = if (partial.isNotBlank()) {
                     "$partial\n\n_[Generazione interrotta: ${t.message}]_"
                 } else {
@@ -532,6 +669,122 @@ class ChatViewModel(
                 generationStartedAtMs = 0L,
                 thinkingDurationSec = 0
             )
+        }
+    }
+
+    /**
+     * Zero-inference-cost continuous learning safety net:
+     * Ensures explicit user memory notes ("segna che...", "ricordati che...", "mi chiamo...", "abito a...")
+     * and explicit skill creation requests ("crea una skill...", "impara questa procedura...") are ALWAYS
+     * persisted in Room + Markdown Vault even if the 4-bit model answered conversationally without calling the tool.
+     */
+    private suspend fun captureExplicitLearningIfMissed(
+        sessionId: Long,
+        userPrompt: String,
+        assistantReply: String,
+        traces: MutableList<ToolCallTrace>
+    ) {
+        val lower = userPrompt.lowercase().trim()
+        if (lower.length < 8) return
+
+        val alreadySavedMemory = synchronized(traces) {
+            traces.any { it.toolName == "save_memory" && it.status == "success" }
+        }
+        val alreadySavedSkill = synchronized(traces) {
+            traces.any { it.toolName == "save_skill" && it.status == "success" }
+        }
+
+        // 1. Explicit memory / note / personal fact capture
+        if (!alreadySavedMemory) {
+            val explicitMemoryPrefixes = listOf(
+                Regex("""(?:ricordati|ricorda|segna|segnati|annota|tieni a mente|memorizza|salva|non dimenticare)\s+(?:che\s+|di\s+)?(.+)""", RegexOption.IGNORE_CASE)
+            )
+            val profilePatterns = listOf(
+                "nome_utente" to Regex("""mi chiamo\s+([A-Za-zÀ-ÿ'\-\s]{2,32})""", RegexOption.IGNORE_CASE),
+                "citta_utente" to Regex("""(?:abito|vivo)\s+(?:a|in)\s+([A-Za-zÀ-ÿ0-9'()\-,\s]{2,42})""", RegexOption.IGNORE_CASE),
+                "lavoro_utente" to Regex("""(?:lavoro come|faccio il|faccio la|sono un|sono una)\s+([A-Za-zÀ-ÿ0-9'\-\s]{3,48})""", RegexOption.IGNORE_CASE),
+                "preferenza_utente" to Regex("""preferisco\s+(?:sempre\s+)?(.{4,120})""", RegexOption.IGNORE_CASE)
+            )
+
+            val explicitFact = explicitMemoryPrefixes.firstNotNullOfOrNull { rx ->
+                rx.find(userPrompt)?.groupValues?.getOrNull(1)?.trim()
+            }?.take(220)
+
+            if (!explicitFact.isNullOrBlank()) {
+                val category = if (lower.contains("preferisc") || lower.contains("rispond") || lower.contains("stile")) {
+                    "PREFERENCE"
+                } else {
+                    "FACT"
+                }
+                val slugKey = explicitFact.lowercase()
+                    .replace(Regex("[^a-z0-9]+"), "_")
+                    .trim('_')
+                    .take(28)
+                    .ifBlank { "nota_${System.currentTimeMillis() % 10000}" }
+                repo.upsertMemoryAndSync(category, slugKey, explicitFact, importance = 4)
+                val trace = ToolCallTrace(
+                    toolName = "save_memory",
+                    category = ToolGroup.MEMORY.id,
+                    argumentsSummary = "[$category] $slugKey = ${explicitFact.take(70)}",
+                    resultSummary = "Salvato automaticamente in Memoria e sincronizzato su Markdown.",
+                    durationMs = 4,
+                    status = "success"
+                )
+                synchronized(traces) { traces.add(trace) }
+                repo.logToolExecution(sessionId, "save_memory", ToolGroup.MEMORY.id, trace.argumentsSummary, trace.resultSummary, 4, true)
+            } else {
+                for ((key, rx) in profilePatterns) {
+                    val matched = rx.find(userPrompt)?.groupValues?.getOrNull(1)?.trim()?.trimEnd('.', ',', '!', '?')
+                    if (!matched.isNullOrBlank() && matched.length >= 2) {
+                        val cat = if (key == "preferenza_utente") "PREFERENCE" else "USER_PROFILE"
+                        repo.upsertMemoryAndSync(cat, key, matched, importance = 4)
+                        val trace = ToolCallTrace(
+                            toolName = "save_memory",
+                            category = ToolGroup.MEMORY.id,
+                            argumentsSummary = "[$cat] $key = ${matched.take(70)}",
+                            resultSummary = "Profilo aggiornato in USER.md / MEMORY.md.",
+                            durationMs = 4,
+                            status = "success"
+                        )
+                        synchronized(traces) { traces.add(trace) }
+                        repo.logToolExecution(sessionId, "save_memory", ToolGroup.MEMORY.id, trace.argumentsSummary, trace.resultSummary, 4, true)
+                        break
+                    }
+                }
+            }
+        }
+
+        // 2. Explicit skill creation capture
+        if (!alreadySavedSkill && assistantReply.length >= 60) {
+            val skillTrigger = listOf(
+                "crea una skill", "salva come skill", "salva questa skill",
+                "impara questa procedura", "impara questo flusso", "nuova skill"
+            ).any { lower.contains(it) }
+            if (skillTrigger) {
+                val slug = lower
+                    .replace(Regex("(crea una skill|salva come skill|salva questa skill|impara questa procedura|impara questo flusso|nuova skill)"), "")
+                    .replace(Regex("[^a-z0-9]+"), "_")
+                    .trim('_')
+                    .take(28)
+                    .ifBlank { "skill_${System.currentTimeMillis() % 10000}" }
+                val title = userPrompt.take(56).trim()
+                repo.upsertSkill(
+                    slug = slug,
+                    title = title,
+                    description = "Skill appresa dalla chat: ${userPrompt.take(90)}",
+                    instructionsMd = assistantReply.take(1500)
+                )
+                val trace = ToolCallTrace(
+                    toolName = "save_skill",
+                    category = ToolGroup.MEMORY.id,
+                    argumentsSummary = "slug=$slug",
+                    resultSummary = "Skill '/$slug' salvata automaticamente nella libreria locale.",
+                    durationMs = 5,
+                    status = "success"
+                )
+                synchronized(traces) { traces.add(trace) }
+                repo.logToolExecution(sessionId, "save_skill", ToolGroup.MEMORY.id, trace.argumentsSummary, trace.resultSummary, 5, true)
+            }
         }
     }
 }

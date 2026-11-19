@@ -3,6 +3,7 @@ package com.example.data
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
+import com.example.agent.ContextAndMemoryEngine
 import com.example.data.db.AgentSkillEntity
 import com.example.data.db.AutomationTaskEntity
 import com.example.data.db.ChatMessageEntity
@@ -115,24 +116,31 @@ class MobHarnRepository(
 
     suspend fun updateSession(session: ChatSessionEntity) = db.chatDao().updateSession(session)
 
-    suspend fun deleteSession(sessionId: Long) = db.chatDao().deleteSession(sessionId)
+    suspend fun deleteSession(sessionId: Long) {
+        db.chatDao().deleteSession(sessionId)
+        vault.deleteSessionDigest(sessionId)
+    }
+
+    suspend fun getSessionDigest(sessionId: Long): String = vault.readSessionDigest(sessionId)
+
+    suspend fun saveSessionDigest(sessionId: Long, digest: String) = vault.writeSessionDigest(sessionId, digest)
 
     suspend fun addMessage(message: ChatMessageEntity): Long = db.chatDao().insertMessage(message)
 
     suspend fun updateMessage(message: ChatMessageEntity) = db.chatDao().updateMessage(message)
 
-    suspend fun searchSessionsHistory(query: String, limit: Int = 12): List<ChatMessageEntity> {
-        val sanitized = query.trim().replace(Regex("[^\\p{L}\\p{N}\\s_-]"), " ").trim()
-        if (sanitized.isBlank()) return emptyList()
-        val ftsTerms = sanitized.split(Regex("\\s+")).filter { it.length >= 2 }
-            .joinToString(" OR ") { "$it*" }
-        return runCatching {
-            if (ftsTerms.isNotBlank()) db.chatDao().searchMessagesFts(ftsTerms, limit)
-            else db.chatDao().searchMessagesFallback(query.trim(), limit)
-        }.getOrElse {
-            db.chatDao().searchMessagesFallback(query.trim(), limit)
+    suspend fun searchSessionsHistory(query: String, limit: Int = 12): List<ChatMessageEntity> =
+        withContext(Dispatchers.Default) {
+            val ftsTerms = ContextAndMemoryEngine.buildFtsOrQuery(query)
+            val fetchLimit = (limit * 3).coerceAtMost(48)
+            val candidates = runCatching {
+                if (ftsTerms.isNotBlank()) db.chatDao().searchMessagesFts(ftsTerms, fetchLimit)
+                else db.chatDao().searchMessagesFallback(query.trim(), fetchLimit)
+            }.getOrElse {
+                db.chatDao().searchMessagesFallback(query.trim(), fetchLimit)
+            }
+            ContextAndMemoryEngine.rankPastMessages(query, candidates, limit)
         }
-    }
 
     // --- Memory & Vault ---
     suspend fun readVault(): VaultDocuments = vault.readVault()
@@ -163,8 +171,15 @@ class MobHarnRepository(
         vault.syncFromMemories(db.memoryDao().getAllMemories())
     }
 
-    suspend fun searchMemories(query: String): List<MemoryEntryEntity> =
-        db.memoryDao().searchMemories(query)
+    suspend fun getAllMemories(): List<MemoryEntryEntity> = db.memoryDao().getAllMemories()
+
+    suspend fun searchMemories(query: String): List<MemoryEntryEntity> = withContext(Dispatchers.Default) {
+        val all = db.memoryDao().getAllMemories()
+        if (all.isEmpty()) return@withContext emptyList()
+        val ranked = ContextAndMemoryEngine.rankMemories(query, all, limit = 12)
+        if (ranked.isNotEmpty()) ranked.map { it.entry }
+        else db.memoryDao().searchMemories(query)
+    }
 
     suspend fun saveSoulMd(content: String) = vault.writeSoulMd(content)
     suspend fun saveUserMd(content: String) = vault.writeUserMd(content)
@@ -187,13 +202,16 @@ class MobHarnRepository(
         instructionsMd: String
     ): Long {
         val cleanSlug = slug.trim().removePrefix("/").lowercase().replace(Regex("[^a-z0-9_-]"), "_")
+        val existing = db.skillDao().getSkillBySlug(cleanSlug)
         val id = db.skillDao().upsertSkill(
             AgentSkillEntity(
+                id = existing?.id ?: 0,
                 slug = cleanSlug,
                 title = title.trim(),
                 description = description.trim(),
                 instructionsMd = instructionsMd.trim(),
                 enabled = true,
+                usageCount = existing?.usageCount ?: 0,
                 updatedAt = System.currentTimeMillis()
             )
         )

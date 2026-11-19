@@ -213,6 +213,32 @@ class MemoryAndSkillsToolSet(
         repository.upsertSkill(slug, title, description, instructionsMd)
         "Skill '/$slug' salvata e sincronizzata nel vault."
     }
+
+    @Tool(description = "Elenca tutte le Skill procedurali salvate nella libreria locale")
+    fun list_skills(): String = monitor.executeTracked(
+        toolName = "list_skills",
+        category = ToolGroup.MEMORY.id,
+        argsSummary = "list_skills"
+    ) {
+        val list = repository.getEnabledSkills()
+        if (list.isEmpty()) "Nessuna skill salvata."
+        else list.joinToString("\n") { "- /${it.slug} (${it.title}, usata ${it.usageCount}x): ${it.description}" }
+    }
+
+    @Tool(description = "Elimina un ricordo obsoleto o errato dalla memoria persistente cercandolo per chiave o testo")
+    fun delete_memory(
+        @ToolParam(description = "Chiave o parola chiave del ricordo da rimuovere") query: String
+    ): String = monitor.executeTracked(
+        toolName = "delete_memory",
+        category = ToolGroup.MEMORY.id,
+        argsSummary = "delete \"$query\""
+    ) {
+        val hits = repository.searchMemories(query)
+        val exact = hits.firstOrNull { it.keyName.equals(query.trim(), ignoreCase = true) } ?: hits.firstOrNull()
+            ?: return@executeTracked "Nessun ricordo trovato per '$query'."
+        repository.deleteMemoryAndSync(exact.id)
+        "Ricordo rimosso: [${exact.category}] ${exact.keyName}"
+    }
 }
 
 class CodingWorkspaceToolSet(
@@ -620,25 +646,28 @@ class MobHarnToolkitRegistry(
 
     /**
      * Selects a focused subset of enabled ToolGroups for the current prompt so edge models
-     * like Gemma 4 E2B/E4B don't drown in 44 tool schemas inside a 4K-8K context window.
+     * like Gemma 4 E2B/E4B stay fast and accurate while ALWAYS keeping Memory & Skills ready
+     * for continuous self-improvement.
      */
     fun selectRoutedToolGroups(userPrompt: String, enabledGroups: Set<String>): Set<String> {
         val p = userPrompt.lowercase()
-        val selected = linkedSetOf<String>()
+        val domainSelected = linkedSetOf<String>()
 
-        fun addIfEnabled(group: ToolGroup) {
-            if (group.id in enabledGroups) selected.add(group.id)
+        fun addDomainIfEnabled(group: ToolGroup) {
+            if (group.id in enabledGroups) domainSelected.add(group.id)
         }
 
-        // 1. Web Search / Live info / Math / URLs
+        // 1. Web Search / Live factual info / Math / URLs
         if (p.containsAny(
                 "cerca", "ricerca", "internet", "web", "google", "online", "notizie", "news",
                 "meteo", "tempo fa", "oggi", "ultime", "prezzo", "quanto costa", "chi è", "chi ha",
                 "cos'è", "cosa è", "http://", "https://", "www.", "sito", "link", "pagina",
-                "calcola", "quanto fa", "radice", "percentuale", "json", "regex", "wikipedia"
+                "calcola", "quanto fa", "radice", "percentuale", "json", "regex", "wikipedia",
+                "popolazione", "abitanti", "quanti", "quante", "quando", "dove si trova",
+                "capitale", "classifica", "risultato", "cambio", "valore", "meteo"
             )
         ) {
-            addIfEnabled(ToolGroup.WEB_CALC)
+            addDomainIfEnabled(ToolGroup.WEB_CALC)
         }
 
         // 2. Coding Workspace & Sandbox
@@ -648,7 +677,7 @@ class MobHarnToolkitRegistry(
                 "funzione", "sandbox", "esegui", "compila", "testa", "index.html", "app.js"
             )
         ) {
-            addIfEnabled(ToolGroup.CODING)
+            addDomainIfEnabled(ToolGroup.CODING)
         }
 
         // 3. Phone-Use (Accessibility UI control)
@@ -658,7 +687,7 @@ class MobHarnToolkitRegistry(
                 "indietro", "home", "notifiche", "screenshot"
             )
         ) {
-            addIfEnabled(ToolGroup.PHONE_USE)
+            addDomainIfEnabled(ToolGroup.PHONE_USE)
         }
 
         // 4. Android System Actions
@@ -671,7 +700,7 @@ class MobHarnToolkitRegistry(
                 "impostazioni", "wifi", "bluetooth"
             )
         ) {
-            addIfEnabled(ToolGroup.ANDROID_ACTIONS)
+            addDomainIfEnabled(ToolGroup.ANDROID_ACTIONS)
         }
 
         // 5. Device Telemetry & Sensors
@@ -681,7 +710,7 @@ class MobHarnToolkitRegistry(
                 "barometro", "posizione", "dove sono", "gps", "pixel"
             )
         ) {
-            addIfEnabled(ToolGroup.TELEMETRY)
+            addDomainIfEnabled(ToolGroup.TELEMETRY)
         }
 
         // 6. Self-Evolving Harness & Custom Tools
@@ -691,32 +720,28 @@ class MobHarnToolkitRegistry(
                 "parametri", "run_custom_tool"
             )
         ) {
-            addIfEnabled(ToolGroup.SELF_EVOLVE)
+            addDomainIfEnabled(ToolGroup.SELF_EVOLVE)
         }
 
         // 7. Background Automations
         if (p.containsAny("automazione", "pianifica", "ogni ora", "ogni giorno", "ricorrente", "cron", "background")) {
-            addIfEnabled(ToolGroup.AUTOMATIONS)
+            addDomainIfEnabled(ToolGroup.AUTOMATIONS)
         }
 
-        // 8. Persistent Memory & Skills
-        if (p.containsAny(
-                "ricorda", "memorizza", "memoria", "memory", "user.md", "skill", "sessione passata",
-                "abbiamo parlato", "salva che", "preferenza", "profilo"
-            )
-        ) {
-            addIfEnabled(ToolGroup.MEMORY)
+        // Default lean core when prompt is general or factual: Web/Calc + Telemetry
+        if (domainSelected.isEmpty()) {
+            addDomainIfEnabled(ToolGroup.WEB_CALC)
+            addDomainIfEnabled(ToolGroup.TELEMETRY)
         }
 
-        // Default lean core when prompt is general or ambiguous: Web/Calc + Memory (only 9 tools!)
-        if (selected.isEmpty()) {
-            addIfEnabled(ToolGroup.WEB_CALC)
-            addIfEnabled(ToolGroup.MEMORY)
-            addIfEnabled(ToolGroup.TELEMETRY)
+        // Keep up to 2 domain groups + ALWAYS attach Memory & Skills (if enabled) so the agent
+        // can save facts, search memories, load skills, and create new skills on every turn!
+        val finalGroups = linkedSetOf<String>()
+        finalGroups.addAll(domainSelected.take(2))
+        if (ToolGroup.MEMORY.id in enabledGroups) {
+            finalGroups.add(ToolGroup.MEMORY.id)
         }
-
-        // Cap to at most 2 groups to keep tool schema tokens compact (<1200 tokens)
-        return selected.take(2).toSet()
+        return finalGroups
     }
 
     private fun String.containsAny(vararg needles: String): Boolean =
@@ -733,6 +758,252 @@ class MobHarnToolkitRegistry(
         if (ToolGroup.SELF_EVOLVE.id in enabledGroups) providers.add(tool(selfEvolveTools))
         if (ToolGroup.PHONE_USE.id in enabledGroups) providers.add(tool(phoneUseTools))
         return providers
+    }
+
+    /**
+     * Direct tracked dispatcher used by LiteRtRuntimeManager's Tool-Call Recovery layer whenever
+     * LiteRT-LM's strict C++ ANTLR parser fails on a slightly malformed call (e.g. `"` instead of `<|"|>`).
+     */
+    fun invokeToolByName(rawName: String, args: Map<String, Any?>): String? {
+        val normalized = rawName.substringAfterLast(':').trim().lowercase()
+
+        fun str(vararg keys: String, default: String = ""): String {
+            for (k in keys) {
+                val direct = args[k] ?: args.entries.firstOrNull { it.key.equals(k, ignoreCase = true) }?.value
+                if (direct != null) {
+                    val s = direct.toString().trim()
+                    if (s.isNotEmpty()) return s
+                }
+            }
+            if (args.size == 1 && keys.isNotEmpty()) {
+                val single = args.values.firstOrNull()?.toString()?.trim()
+                if (!single.isNullOrEmpty()) return single
+            }
+            return default
+        }
+
+        fun intArg(vararg keys: String, default: Int): Int {
+            for (k in keys) {
+                val raw = args[k] ?: args.entries.firstOrNull { it.key.equals(k, ignoreCase = true) }?.value
+                when (raw) {
+                    is Number -> return raw.toInt()
+                    is String -> raw.trim().toIntOrNull()?.let { return it }
+                }
+            }
+            return default
+        }
+
+        fun doubleArg(vararg keys: String, default: Double): Double {
+            for (k in keys) {
+                val raw = args[k] ?: args.entries.firstOrNull { it.key.equals(k, ignoreCase = true) }?.value
+                when (raw) {
+                    is Number -> return raw.toDouble()
+                    is String -> raw.trim().toDoubleOrNull()?.let { return it }
+                }
+            }
+            return default
+        }
+
+        fun boolArg(vararg keys: String, default: Boolean): Boolean {
+            for (k in keys) {
+                val raw = args[k] ?: args.entries.firstOrNull { it.key.equals(k, ignoreCase = true) }?.value
+                when (raw) {
+                    is Boolean -> return raw
+                    is String -> when (raw.trim().lowercase()) {
+                        "true", "1", "yes", "si" -> return true
+                        "false", "0", "no" -> return false
+                    }
+                }
+            }
+            return default
+        }
+
+        return when (normalized) {
+            // Web & Calc
+            "web_search", "search_web", "google_search" ->
+                webCalcTools.web_search(str("query", "q", "search_query", "text"))
+            "fetch_webpage", "fetch_url", "read_webpage" ->
+                webCalcTools.fetch_webpage(str("url", "link", "href"))
+            "calculate_expression", "calculate", "calc" ->
+                webCalcTools.calculate_expression(str("expression", "expr", "formula"))
+            "validate_json_regex", "validate_json_or_regex" ->
+                webCalcTools.validate_json_regex(
+                    mode = str("mode", default = "json"),
+                    input = str("input", "text", "data"),
+                    pattern = str("pattern", "regex")
+                )
+
+            // Memory & Skills
+            "save_memory", "remember_fact", "remember", "memorize" ->
+                memoryTools.save_memory(
+                    category = str("category", "cat", default = "FACT"),
+                    keyName = str("keyName", "key_name", "key", default = "nota_${System.currentTimeMillis() % 10000}"),
+                    content = str("content", "value", "fact", "text"),
+                    importance = intArg("importance", "priority", default = 3)
+                )
+            "search_memory", "recall_memory", "get_memory" ->
+                memoryTools.search_memory(str("query", "q", "keyword", "key"))
+            "delete_memory", "forget_memory" ->
+                memoryTools.delete_memory(str("query", "keyName", "key", "q"))
+            "search_past_sessions", "search_history" ->
+                memoryTools.search_past_sessions(str("query", "q", "keyword"))
+            "list_skills" ->
+                memoryTools.list_skills()
+            "load_skill", "use_skill", "get_skill" ->
+                memoryTools.load_skill(str("slug", "name", "skill"))
+            "save_skill", "create_skill", "learn_skill" ->
+                memoryTools.save_skill(
+                    slug = str("slug", "name", default = "skill_${System.currentTimeMillis() % 10000}"),
+                    title = str("title", "name", default = "Skill appresa"),
+                    description = str("description", "desc", default = "Procedura appresa in chat"),
+                    instructionsMd = str("instructionsMd", "instructions_md", "instructions", "content")
+                )
+
+            // Android System Actions
+            "launch_app", "open_app", "start_app" ->
+                androidTools.launch_app(str("appName", "app_name", "app", "name", "package"))
+            "open_url", "open_link" ->
+                androidTools.open_url(str("url", "link"))
+            "open_maps", "maps" ->
+                androidTools.open_maps(str("query", "location", "place", "address"))
+            "set_alarm" ->
+                androidTools.set_alarm(
+                    hour = intArg("hour", "hours", "h", default = 8),
+                    minute = intArg("minute", "minutes", "m", default = 0),
+                    message = str("message", "label", "title", default = "MobHarn")
+                )
+            "set_timer", "start_timer" ->
+                androidTools.set_timer(
+                    seconds = intArg("seconds", "duration", "sec", default = 60),
+                    message = str("message", "label", default = "Timer MobHarn")
+                )
+            "create_calendar_event" ->
+                androidTools.create_calendar_event(
+                    title = str("title", "name", default = "Evento"),
+                    description = str("description", "notes"),
+                    startInMinutes = intArg("startInMinutes", "start_in_minutes", default = 60),
+                    durationMinutes = intArg("durationMinutes", "duration_minutes", default = 60)
+                )
+            "compose_email", "draft_email" ->
+                androidTools.compose_email(
+                    to = str("to", "recipient", "email"),
+                    subject = str("subject", "title"),
+                    body = str("body", "text", "message")
+                )
+            "compose_sms", "draft_sms" ->
+                androidTools.compose_sms(
+                    phoneNumber = str("phoneNumber", "phone_number", "to", "number"),
+                    message = str("message", "body", "text")
+                )
+            "dial_number", "call_number" ->
+                androidTools.dial_number(str("phoneNumber", "phone_number", "number"))
+            "share_text" ->
+                androidTools.share_text(str("text", "content", "message"))
+            "open_system_settings", "open_settings" ->
+                androidTools.open_system_settings(str("section", "setting", default = "general"))
+
+            // Coding Workspace & Sandbox
+            "list_workspace_files", "list_files" ->
+                codingTools.list_workspace_files()
+            "read_file_lines", "read_file" ->
+                codingTools.read_file_lines(
+                    relativePath = str("relativePath", "relative_path", "path", "file"),
+                    startLine = intArg("startLine", "start_line", default = 1),
+                    endLine = intArg("endLine", "end_line", default = 150)
+                )
+            "write_workspace_file", "write_file" ->
+                codingTools.write_workspace_file(
+                    relativePath = str("relativePath", "relative_path", "path", "file"),
+                    content = str("content", "code", "text"),
+                    summary = str("summary", default = "Aggiornato da Gemma 4")
+                )
+            "patch_workspace_file", "patch_file" ->
+                codingTools.patch_workspace_file(
+                    relativePath = str("relativePath", "relative_path", "path", "file"),
+                    oldText = str("oldText", "old_text", "search"),
+                    newText = str("newText", "new_text", "replace")
+                )
+            "search_code", "grep_workspace" ->
+                codingTools.search_code(str("pattern", "query", "q"))
+            "run_js_sandbox", "run_javascript", "run_js" ->
+                codingTools.run_js_sandbox(str("code", "script", "js"))
+            "run_sql_sandbox", "run_sql" ->
+                codingTools.run_sql_sandbox(str("sqlScript", "sql_script", "sql", "query"))
+
+            // Telemetry
+            "get_device_telemetry", "device_telemetry", "telemetry" ->
+                telemetryTools.get_device_telemetry()
+            "read_clipboard", "get_clipboard" ->
+                telemetryTools.read_clipboard()
+            "get_sensor_snapshot", "get_sensors" ->
+                telemetryTools.get_sensor_snapshot()
+            "get_approx_location", "get_location" ->
+                telemetryTools.get_approx_location()
+
+            // Automations
+            "schedule_automation" ->
+                automationTools.schedule_automation(
+                    name = str("name", "title", default = "Automazione"),
+                    prompt = str("prompt", "instruction", "query"),
+                    actionType = str("actionType", "action_type", default = "BRIEFING"),
+                    intervalMinutes = intArg("intervalMinutes", "interval_minutes", default = 60),
+                    isPeriodic = boolArg("isPeriodic", "is_periodic", default = true)
+                )
+
+            // Self-Evolve
+            "create_custom_tool" ->
+                selfEvolveTools.create_custom_tool(
+                    name = str("name"),
+                    description = str("description"),
+                    parametersDoc = str("parametersDoc", "parameters_doc", default = "inputJson"),
+                    jsCode = str("jsCode", "js_code", "code")
+                )
+            "list_custom_tools" ->
+                selfEvolveTools.list_custom_tools()
+            "run_custom_tool" ->
+                selfEvolveTools.run_custom_tool(
+                    name = str("name"),
+                    inputJson = str("inputJson", "input_json", "input", default = "{}")
+                )
+            "delete_custom_tool" ->
+                selfEvolveTools.delete_custom_tool(str("name"))
+            "update_soul_md" ->
+                selfEvolveTools.update_soul_md(
+                    mode = str("mode", default = "append"),
+                    content = str("content", "text"),
+                    rationale = str("rationale", default = "Miglioramento harness")
+                )
+            "tune_harness_settings", "tune_harness_params" ->
+                selfEvolveTools.tune_harness_settings(
+                    temperature = doubleArg("temperature", default = -1.0),
+                    topP = doubleArg("topP", "top_p", default = -1.0),
+                    maxNumTokens = intArg("maxNumTokens", "max_num_tokens", default = -1),
+                    activeProject = str("activeProject", "active_project"),
+                    enableToolGroup = str("enableToolGroup", "enable_tool_group")
+                )
+
+            // Phone-Use
+            "read_screen_ui", "read_screen" ->
+                phoneUseTools.read_screen_ui(intArg("maxNodes", "max_nodes", default = 80))
+            "tap_screen_text", "tap_element" ->
+                phoneUseTools.tap_screen_text(str("targetText", "target_text", "text", "label"))
+            "tap_screen_coords", "tap_coordinates" ->
+                phoneUseTools.tap_screen_coords(
+                    x = intArg("x", default = 0),
+                    y = intArg("y", default = 0)
+                )
+            "type_screen_text", "type_text" ->
+                phoneUseTools.type_screen_text(
+                    fieldHint = str("fieldHint", "field_hint", "hint"),
+                    text = str("text", "value")
+                )
+            "scroll_screen" ->
+                phoneUseTools.scroll_screen(str("direction", default = "down"))
+            "phone_global_action", "system_navigate" ->
+                phoneUseTools.phone_global_action(str("action", "command", default = "home"))
+
+            else -> null
+        }
     }
 }
 

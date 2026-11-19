@@ -73,6 +73,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.BuildConfig
 import com.example.agent.EngineStatus
 import com.example.data.db.ModelProfileEntity
 import com.example.ui.theme.JetBrainsMonoFontFamily
@@ -354,7 +355,20 @@ fun ModelHubScreen(
                 }
             }
 
-            item { Spacer(Modifier.height(12.dp)) }
+            item {
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 4.dp, bottom = 14.dp)
+                ) {
+                    Text(
+                        text = "MobHarn v${BuildConfig.VERSION_NAME} (build ${BuildConfig.VERSION_CODE})",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f)
+                    )
+                }
+            }
         }
     }
 }
@@ -513,12 +527,14 @@ private fun ModelProfileCard(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
+                    val fileLower = File(profile.filePath).name.lowercase()
+                    val isAotNpuFile = fileLower.contains("tensor") || fileLower.contains("_g5") || fileLower.contains("_g6") || fileLower.contains("npu")
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        items(listOf("NPU", "GPU", "CPU")) { backend ->
+                        items(listOf("GPU", "NPU", "CPU")) { backend ->
                             FilterChip(
                                 selected = profile.preferredBackend.equals(backend, ignoreCase = true),
                                 onClick = { onUpdate(profile.copy(preferredBackend = backend)) },
-                                label = { Text(if (backend == "NPU") "NPU" else backend) }
+                                label = { Text(backend) }
                             )
                         }
                         item {
@@ -536,15 +552,29 @@ private fun ModelProfileCard(
                             )
                         }
                     }
+                    if (profile.preferredBackend.equals("NPU", ignoreCase = true) && !isAotNpuFile) {
+                        Text(
+                            text = "La NPU richiede Tensor G5+ e un file AOT (*_Google_Tensor_G5.litertlm). Per i file standard usa GPU.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = StatusWarning
+                        )
+                    }
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        items(listOf(4096, 6144, 8192, 16384)) { ctx ->
-                            val label = if (ctx == 6144) "6K Eco" else "${ctx / 1024}K"
+                        items(listOf(4096, 8192, 16384, 32768)) { ctx ->
+                            val label = "${ctx / 1024}K"
                             FilterChip(
                                 selected = profile.maxNumTokens == ctx,
                                 onClick = { onUpdate(profile.copy(maxNumTokens = ctx)) },
                                 label = { Text(label) }
                             )
                         }
+                    }
+                    if (profile.maxNumTokens >= 16384) {
+                        Text(
+                            text = "Contesto lungo adattivo alla RAM libera, con auto-compattamento automatico per lavori lunghi.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                     Column {
                         Text(

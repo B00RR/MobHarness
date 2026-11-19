@@ -22,6 +22,7 @@ class MarkdownVaultManager(context: Context) {
 
     private val vaultDir: File = File(context.filesDir, "mobharn_vault").apply { mkdirs() }
     private val skillsDir: File = File(vaultDir, "skills").apply { mkdirs() }
+    private val sessionsDir: File = File(vaultDir, "sessions").apply { mkdirs() }
 
     private val soulFile = File(vaultDir, "SOUL.md")
     private val userFile = File(vaultDir, "USER.md")
@@ -56,6 +57,28 @@ class MarkdownVaultManager(context: Context) {
 
     suspend fun writeMemoryMd(content: String) = withContext(Dispatchers.IO) {
         memoryFile.writeText(content)
+    }
+
+    suspend fun readSessionDigest(sessionId: Long): String = withContext(Dispatchers.IO) {
+        if (sessionId <= 0L) return@withContext ""
+        val file = File(sessionsDir, "session_$sessionId.md")
+        if (file.exists()) file.readText() else ""
+    }
+
+    suspend fun writeSessionDigest(sessionId: Long, digest: String) = withContext(Dispatchers.IO) {
+        if (sessionId <= 0L) return@withContext
+        val file = File(sessionsDir, "session_$sessionId.md")
+        if (digest.isBlank()) {
+            if (file.exists()) file.delete()
+        } else {
+            file.writeText(digest.trim())
+        }
+    }
+
+    suspend fun deleteSessionDigest(sessionId: Long) = withContext(Dispatchers.IO) {
+        if (sessionId <= 0L) return@withContext
+        val file = File(sessionsDir, "session_$sessionId.md")
+        if (file.exists()) file.delete()
     }
 
     suspend fun syncFromMemories(memories: List<MemoryEntryEntity>) = withContext(Dispatchers.IO) {

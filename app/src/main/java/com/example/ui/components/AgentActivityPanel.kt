@@ -83,21 +83,34 @@ private fun describeToolAction(toolName: String): ToolPresentation = when (toolN
     "launch_app" -> ToolPresentation("Apertura app", "App aperta", Icons.AutoMirrored.Filled.Launch)
     "open_url" -> ToolPresentation("Apertura link", "Link aperto", Icons.AutoMirrored.Filled.Launch)
     "open_maps" -> ToolPresentation("Apertura Mappe", "Mappe aperte", Icons.AutoMirrored.Filled.Launch)
+    "open_system_settings" -> ToolPresentation("Apertura Impostazioni", "Impostazioni aperte", Icons.AutoMirrored.Filled.Launch)
     "set_alarm" -> ToolPresentation("Impostazione sveglia", "Sveglia impostata", Icons.Default.Schedule)
+    "set_timer" -> ToolPresentation("Avvio timer", "Timer avviato", Icons.Default.Schedule)
     "create_calendar_event" -> ToolPresentation("Creazione evento calendario", "Evento creato", Icons.Default.Schedule)
-    "read_file" -> ToolPresentation("Lettura file", "File letto", Icons.Default.Description)
-    "write_file", "patch_file" -> ToolPresentation("Modifica file", "File modificato", Icons.Default.Code)
-    "list_workspace_files", "grep_workspace" -> ToolPresentation("Esplorazione workspace", "Workspace esplorato", Icons.Default.FolderOpen)
-    "run_javascript", "run_sql", "validate_json_or_regex" -> ToolPresentation("Esecuzione in sandbox", "Codice eseguito", Icons.Default.Terminal)
+    "compose_email", "compose_sms", "dial_number", "share_text" ->
+        ToolPresentation("Azione comunicazione", "Azione preparata", Icons.AutoMirrored.Filled.Launch)
+    "read_file", "read_file_lines" -> ToolPresentation("Lettura file", "File letto", Icons.Default.Description)
+    "write_file", "write_workspace_file", "patch_file", "patch_workspace_file" ->
+        ToolPresentation("Modifica file", "File modificato", Icons.Default.Code)
+    "list_workspace_files", "grep_workspace", "search_code" ->
+        ToolPresentation("Esplorazione workspace", "Workspace esplorato", Icons.Default.FolderOpen)
+    "run_javascript", "run_js_sandbox", "run_sql", "run_sql_sandbox", "validate_json_or_regex", "validate_json_regex" ->
+        ToolPresentation("Esecuzione in sandbox", "Codice eseguito", Icons.Default.Terminal)
     "calculate_expression" -> ToolPresentation("Calcolo espressione", "Calcolo completato", Icons.Default.Calculate)
-    "get_device_telemetry", "get_sensors", "get_approx_location", "read_clipboard" ->
+    "get_device_telemetry", "get_sensors", "get_sensor_snapshot", "get_approx_location", "read_clipboard" ->
         ToolPresentation("Lettura telemetria dispositivo", "Telemetria letta", Icons.Default.Smartphone)
-    "read_screen", "tap_element", "tap_coordinates", "type_text", "scroll_screen", "system_navigate" ->
+    "read_screen", "read_screen_ui", "tap_element", "tap_screen_text", "tap_coordinates", "tap_screen_coords",
+    "type_text", "type_screen_text", "scroll_screen", "system_navigate", "phone_global_action" ->
         ToolPresentation("Controllo schermo", "Azione schermo eseguita", Icons.Default.TouchApp)
-    "remember_fact", "search_memory", "read_vault", "update_soul_md", "search_past_sessions" ->
-        ToolPresentation("Accesso alla memoria", "Memoria consultata", Icons.Default.Psychology)
-    "list_skills", "load_skill", "save_skill" -> ToolPresentation("Caricamento skill", "Skill caricata", Icons.Default.AutoAwesome)
-    "create_custom_tool", "run_custom_tool" -> ToolPresentation("Esecuzione custom tool", "Custom tool eseguito", Icons.Default.Build)
+    "save_memory", "remember_fact" -> ToolPresentation("Salvataggio in memoria", "Ricordo salvato", Icons.Default.Psychology)
+    "delete_memory" -> ToolPresentation("Aggiornamento memoria", "Ricordo rimosso", Icons.Default.Psychology)
+    "search_memory", "read_vault", "search_past_sessions" ->
+        ToolPresentation("Ricerca nella memoria", "Memoria consultata", Icons.Default.Psychology)
+    "list_skills" -> ToolPresentation("Lettura libreria skill", "Skill elencate", Icons.Default.AutoAwesome)
+    "load_skill" -> ToolPresentation("Caricamento skill", "Skill caricata", Icons.Default.AutoAwesome)
+    "save_skill" -> ToolPresentation("Salvataggio nuova skill", "Skill salvata", Icons.Default.AutoAwesome)
+    "create_custom_tool", "list_custom_tools", "run_custom_tool", "delete_custom_tool", "update_soul_md", "tune_harness_settings" ->
+        ToolPresentation("Auto-evoluzione harness", "Harness aggiornato", Icons.Default.Build)
     "schedule_automation" -> ToolPresentation("Pianificazione automazione", "Automazione pianificata", Icons.Default.Schedule)
     else -> ToolPresentation("Esecuzione $toolName", "Completato $toolName", Icons.Default.Build)
 }

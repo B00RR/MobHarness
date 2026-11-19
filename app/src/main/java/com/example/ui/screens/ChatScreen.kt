@@ -71,6 +71,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.ModalDrawerSheet
@@ -510,7 +511,23 @@ fun ChatScreen(
                                 modifier = Modifier.testTag("toggle_cot_menu_item")
                             )
                             DropdownMenuItem(
-                                text = { Text("Compatta memoria chat") },
+                                text = {
+                                    Column {
+                                        val usedK = formatTokensShort(uiState.contextTokensUsed)
+                                        val maxK = formatTokensShort(uiState.contextTokensMax)
+                                        Text(
+                                            if (uiState.contextTokensUsed > 0) "Compatta contesto ($usedK / $maxK)"
+                                            else "Compatta contesto chat"
+                                        )
+                                        if (uiState.hasSessionDigest) {
+                                            Text(
+                                                "Checkpoint attivo",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.primary
+                                            )
+                                        }
+                                    }
+                                },
                                 leadingIcon = { Icon(Icons.Default.Compress, contentDescription = null) },
                                 onClick = {
                                     showTopOverflow = false
@@ -530,6 +547,20 @@ fun ChatScreen(
                     }
                 }
             )
+
+            // Ultra-subtle 2.dp hairline context usage indicator (visible only during active threads)
+            if (messages.isNotEmpty() && uiState.contextTokensUsed > 0 && uiState.contextTokensMax > 0) {
+                val ctxFraction = (uiState.contextTokensUsed.toFloat() / uiState.contextTokensMax.toFloat())
+                    .coerceIn(0.02f, 1f)
+                LinearProgressIndicator(
+                    progress = { ctxFraction },
+                    color = if (ctxFraction >= 0.65f) StatusWarning else MaterialTheme.colorScheme.primary.copy(alpha = 0.55f),
+                    trackColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(2.dp)
+                )
+            }
 
             // Quick Sandbox Output Banner (only when user runs a code snippet from chat)
             AnimatedVisibility(visible = uiState.quickSandboxBanner != null) {
@@ -815,6 +846,14 @@ fun ChatScreen(
                 }
             }
         }
+    }
+}
+
+private fun formatTokensShort(tokens: Int): String {
+    return if (tokens >= 1000) {
+        String.format(Locale.US, "%.1fK", tokens / 1000f)
+    } else {
+        "$tokens"
     }
 }
 

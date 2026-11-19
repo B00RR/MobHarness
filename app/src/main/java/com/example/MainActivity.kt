@@ -96,6 +96,8 @@ class MainActivity : ComponentActivity() {
     override fun onStop() {
         super.onStop()
         if (::container.isInitialized && !isChangingConfigurations) {
+            // Flip background flag synchronously so any running inference yields CPU/GPU immediately
+            container.runtimeManager.markBackgroundStateImmediate(true)
             container.systemActions.evictIdleConnections()
             lifecycleScope.launch {
                 val autoUnload = runCatching {
