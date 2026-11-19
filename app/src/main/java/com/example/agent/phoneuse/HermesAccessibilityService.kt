@@ -71,7 +71,15 @@ class HermesAccessibilityService : AccessibilityService() {
                         if (clickable) add("tap")
                         if (editable) add("input")
                         if (scrollable) add("scroll")
-                        if (node.isCheckable) add(if (node.isChecked) "checked" else "unchecked")
+                        if (node.isCheckable) {
+                            val checkedNow = if (Build.VERSION.SDK_INT >= 36) {
+                                node.checked == AccessibilityNodeInfo.CHECKED_STATE_TRUE
+                            } else {
+                                @Suppress("DEPRECATION")
+                                node.isChecked
+                            }
+                            add(if (checkedNow) "checked" else "unchecked")
+                        }
                     }.joinToString(",")
                     val label = when {
                         text.isNotEmpty() && desc.isNotEmpty() && text != desc -> "\"${text.take(70)}\" (${desc.take(40)})"

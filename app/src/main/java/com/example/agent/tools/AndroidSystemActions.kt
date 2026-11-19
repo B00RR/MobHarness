@@ -22,6 +22,7 @@ import android.os.StatFs
 import android.provider.AlarmClock
 import android.provider.CalendarContract
 import androidx.core.content.ContextCompat
+import androidx.core.net.toUri
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -213,7 +214,7 @@ class AndroidSystemActions(private val context: Context) {
 
     fun openMaps(query: String): String {
         val encoded = URLEncoder.encode(query, "UTF-8")
-        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("geo:0,0?q=$encoded")).apply {
+        val intent = Intent(Intent.ACTION_VIEW, "geo:0,0?q=$encoded".toUri()).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         return launchIntentSafely(intent, "Maps aperto per: $query")
@@ -221,7 +222,7 @@ class AndroidSystemActions(private val context: Context) {
 
     fun openUrl(url: String): String {
         val clean = if (url.startsWith("http://") || url.startsWith("https://")) url else "https://$url"
-        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(clean)).apply {
+        val intent = Intent(Intent.ACTION_VIEW, clean.toUri()).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         return launchIntentSafely(intent, "URL aperto nel browser: $clean")
@@ -257,7 +258,7 @@ class AndroidSystemActions(private val context: Context) {
     }
 
     fun composeEmail(to: String, subject: String, body: String): String {
-        val intent = Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:${Uri.encode(to.trim())}")).apply {
+        val intent = Intent(Intent.ACTION_SENDTO, "mailto:${Uri.encode(to.trim())}".toUri()).apply {
             putExtra(Intent.EXTRA_SUBJECT, subject)
             putExtra(Intent.EXTRA_TEXT, body)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -266,7 +267,7 @@ class AndroidSystemActions(private val context: Context) {
     }
 
     fun composeSms(phoneNumber: String, message: String): String {
-        val intent = Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:${Uri.encode(phoneNumber.trim())}")).apply {
+        val intent = Intent(Intent.ACTION_SENDTO, "smsto:${Uri.encode(phoneNumber.trim())}".toUri()).apply {
             putExtra("sms_body", message)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
@@ -274,7 +275,7 @@ class AndroidSystemActions(private val context: Context) {
     }
 
     fun dialNumber(phoneNumber: String): String {
-        val intent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:${Uri.encode(phoneNumber.trim())}")).apply {
+        val intent = Intent(Intent.ACTION_DIAL, "tel:${Uri.encode(phoneNumber.trim())}".toUri()).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         return launchIntentSafely(intent, "Tastierino aperto con $phoneNumber")

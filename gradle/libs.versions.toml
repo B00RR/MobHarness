@@ -40,8 +40,8 @@ secretsGradlePlugin = "2.0.1"
 googleServices = "4.5.0"
 credentials = "1.5.0"
 googleid = "1.1.1"
-litertlmAndroid = "latest.release"
-litertNpuGoogleTensor = "latest.release"
+litertlmAndroid = "0.19.1"
+litertNpuGoogleTensor = "2.3.2"
 workRuntimeKtx = "2.10.0"
 
 

@@ -283,7 +283,7 @@ class LiteRtRuntimeManager(
                 Content.ImageFile(imageFilePath),
                 Content.Text(userPrompt.ifBlank { "Analizza questa immagine in dettaglio." })
             )
-            conversation.sendMessageAsync(Message.of(contentList))
+            conversation.sendMessageAsync(Message.user(Contents.of(contentList)))
         } else {
             conversation.sendMessageAsync(userPrompt)
         }
