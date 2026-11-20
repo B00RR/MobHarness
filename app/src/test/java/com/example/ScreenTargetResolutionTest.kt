@@ -22,6 +22,7 @@ import com.example.data.vault.MarkdownVaultManager
 import com.example.data.workspace.WorkspaceManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -229,9 +230,7 @@ class ScreenTargetResolutionTest {
             phoneUse.tap_screen_text(targetText = "Apri", contextHint = "Scheda beta")
         }
 
-        while (approvalCoordinator.pendingApproval.value == null) {
-            delay(10)
-        }
+        kotlinx.coroutines.withTimeout(5_000) { approvalCoordinator.pendingApproval.first { it != null } }
         val pending = requireNotNull(approvalCoordinator.pendingApproval.value)
         assertNull("Screen targets must never allow permanent remembered approval", pending.rememberKey)
 
@@ -292,7 +291,7 @@ class ScreenTargetResolutionTest {
         val scrollJob = async(Dispatchers.Default) {
             phoneUse.scroll_screen(direction = "down", containerHint = "Lista principale")
         }
-        while (approvalCoordinator.pendingApproval.value == null) delay(10)
+        kotlinx.coroutines.withTimeout(5_000) { approvalCoordinator.pendingApproval.first { it != null } }
         val scrollPending = requireNotNull(approvalCoordinator.pendingApproval.value)
         assertNull(scrollPending.rememberKey)
         approvalCoordinator.resolve(scrollPending.id, approved = true)
@@ -313,7 +312,7 @@ class ScreenTargetResolutionTest {
         val typeJob = async(Dispatchers.Default) {
             phoneUse.type_screen_text(fieldHint = "Codice pratica", text = "PRIVATE_CODE_789")
         }
-        while (approvalCoordinator.pendingApproval.value == null) delay(10)
+        kotlinx.coroutines.withTimeout(5_000) { approvalCoordinator.pendingApproval.first { it != null } }
         val typePending = requireNotNull(approvalCoordinator.pendingApproval.value)
         assertNull(typePending.rememberKey)
         assertFalse(typePending.argumentsSummary.contains("PRIVATE_CODE_789"))
@@ -335,7 +334,7 @@ class ScreenTargetResolutionTest {
 
         // Case 1: Window package changes while waiting for consent
         val job1 = async(Dispatchers.Default) { phoneUse.tap_screen_text("Conferma") }
-        while (approvalCoordinator.pendingApproval.value == null) delay(10)
+        kotlinx.coroutines.withTimeout(5_000) { approvalCoordinator.pendingApproval.first { it != null } }
         val p1 = requireNotNull(approvalCoordinator.pendingApproval.value)
         val otherRoot = makeNode(pkg = "org.fixture.other", className = "android.widget.LinearLayout", bounds = Rect(0, 0, 1080, 1920))
         val otherBtn = makeNode(pkg = "org.fixture.other", text = "Conferma", clickable = true, bounds = Rect(100, 200, 400, 300))
@@ -350,7 +349,7 @@ class ScreenTargetResolutionTest {
         currentRoot = root
         service.captureScreenTree()
         val job2 = async(Dispatchers.Default) { phoneUse.tap_screen_text("Conferma") }
-        while (approvalCoordinator.pendingApproval.value == null) delay(10)
+        kotlinx.coroutines.withTimeout(5_000) { approvalCoordinator.pendingApproval.first { it != null } }
         val p2 = requireNotNull(approvalCoordinator.pendingApproval.value)
         MobHarnAccessibilityService.setTestInstance(null)
         approvalCoordinator.resolve(p2.id, approved = true)
