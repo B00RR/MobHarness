@@ -41,17 +41,13 @@ abstract class MobHarnDatabase : RoomDatabase() {
         @Volatile
         private var INSTANCE: MobHarnDatabase? = null
 
-        fun getInstance(context: Context): MobHarnDatabase {
-            return INSTANCE ?: synchronized(this) {
-                INSTANCE ?: Room.databaseBuilder(
-                    context.applicationContext,
-                    MobHarnDatabase::class.java,
-                    "mobharn.db"
-                )
-                    .addMigrations(MIGRATION_2_3)
-                    .build()
-                    .also { INSTANCE = it }
-            }
+        internal fun open(context: Context, name: String): MobHarnDatabase =
+            Room.databaseBuilder(context.applicationContext, MobHarnDatabase::class.java, name)
+                .addMigrations(MIGRATION_2_3)
+                .build()
+
+        fun getInstance(context: Context): MobHarnDatabase = INSTANCE ?: synchronized(this) {
+            INSTANCE ?: open(context, "mobharn.db").also { INSTANCE = it }
         }
     }
 }
