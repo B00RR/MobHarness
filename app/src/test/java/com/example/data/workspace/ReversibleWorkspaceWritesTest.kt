@@ -17,6 +17,7 @@ import com.example.data.vault.MarkdownVaultManager
 import com.example.di.MobHarnAppContainer
 import com.example.ui.viewmodel.ChatViewModel
 import com.example.ui.viewmodel.StudioViewModel
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -469,7 +470,8 @@ class ReversibleWorkspaceWritesTest {
 
             // Chat code-block save uses shared repository and is reversible via undo
             val chatVm = ChatViewModel(context, container)
-            waitUntil { chatVm.preferences.value.activeProjectName == appProject }
+            val prefsReady = async { chatVm.preferences.first { it.activeProjectName == appProject } }
+            try { waitUntil { prefsReady.isCompleted } } finally { prefsReady.cancel() }
             val beforeFiles = container.repository.workspace.listFiles(appProject).map { it.relativePath }.toSet()
             chatVm.saveCodeBlockToWorkspace("js", "console.log('from chat');\n")
             waitUntil {
@@ -489,6 +491,7 @@ class ReversibleWorkspaceWritesTest {
     private suspend fun waitUntil(timeoutMs: Long = 3_000L, predicate: suspend () -> Boolean) {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
             if (predicate()) return
             delay(25)
         }

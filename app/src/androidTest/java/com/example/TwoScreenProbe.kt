@@ -17,13 +17,19 @@ class TwoScreenProbe {
         val app = MobHarnAppContainer.getInstance(inst.targetContext)
         val tools = app.toolkitRegistry.phoneUseTools
         val pkg = inst.context.packageName
-        suspend fun observed(label: String): String = withTimeout(12_000) {
+        suspend fun observed(label: String): String {
+            var last = "service not bound"
+            val ready = withTimeoutOrNull(12_000) {
             while (true) {
                 val tree = runCatching { MobHarnAccessibilityService.instance?.captureScreenTree() }.getOrNull().orEmpty()
+                last = tree.ifEmpty { "service not bound" }
                 if (tree.startsWith("App in primo piano: $pkg ") && tree.contains("\"$label\"")) break
                 delay(120)
             }
-            tools.read_screen_ui()
+            true
+            }
+            check(ready == true) { "Missing $label; last observation: $last" }
+            return tools.read_screen_ui()
         }
         suspend fun tapOnce(label: String) = coroutineScope {
             val action = async(Dispatchers.IO) { tools.tap_screen_text(label) }
@@ -37,7 +43,7 @@ class TwoScreenProbe {
             app.toolMonitor.beginTurn()
             app.toolMonitor.requireApprovalForExternal = true
             val command = "am start -W --activity-clear-task --activity-new-task -n $pkg/com.example.ScreenFixture --ez enabled $on"
-            ParcelFileDescriptor.AutoCloseInputStream(automation.executeShellCommand(command)).bufferedReader().use { it.readText() }
+            ParcelFileDescriptor.AutoCloseInputStream(automation.executeShellCommand(command)).bufferedReader().use { val out = it.readText(); check(out.contains("Status: ok")) { out } }
             assertTrue(observed("Archivio").contains("Archivio"))
             tapOnce("Archivio")
             assertTrue(observed("Dettagli").contains("Dettagli"))
