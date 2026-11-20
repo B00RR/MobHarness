@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">MobHarn</string>
+    <string name="app_name">MobHarn Test</string>
     <string name="nav_chat">Chat</string>
     <string name="nav_studio">Studio</string>
     <string name="nav_memory">Memoria</string>
