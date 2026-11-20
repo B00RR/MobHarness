@@ -157,9 +157,17 @@ class MobHarnAccessibilityService : AccessibilityService() {
         val t = target ?: error("Nessun bersaglio univoco sulla schermata letta. Rileggi prima di agire.")
         val root = withTimeoutOrNull(3200L) {
             var r = activeApp()
-            while (r?.windowKey() != t.window) { kotlinx.coroutines.delay(120); r = activeApp() }
+            while (r == null) {
+                check(instance === this@MobHarnAccessibilityService &&
+                    getSystemService(android.app.KeyguardManager::class.java)?.isDeviceLocked == false) {
+                    "Telefono bloccato o servizio scollegato. Nessuna azione."
+                }
+                kotlinx.coroutines.delay(120)
+                r = activeApp()
+            }
+            check(r.windowKey() == t.window) { "Finestra cambiata. Nessuna azione." }
             r
-        } ?: error("La finestra autorizzata non è tornata in primo piano. Nessuna azione.")
+        } ?: error("Finestra autorizzata non visibile. Nessuna azione. Chiudi le notifiche e rileggi la schermata.")
         val n = requireNotNull(resolveTarget(root, t)) { "Il bersaglio è cambiato. Nessuna azione." }
         check(activeApp()?.windowKey() == t.window) { "Finestra cambiata." }
         observed = null // Require a fresh read before the next action.

@@ -54,6 +54,14 @@ class PhoneTypingPrivacyRegressionTest {
         phoneUse = PhoneUseToolSet(monitor)
     }
 
+    @Test fun coordinatesWithoutATargetFailWithoutPrompting() = runBlocking {
+        val traces = mutableListOf<ToolCallTrace>()
+        monitor.onLiveTraceUpdate = { traces.add(it) }
+        phoneUse.tap_screen_coords(4, 27)
+        assertEquals("error", traces.last().status)
+        assertEquals(null, approvalCoordinator.pendingApproval.value)
+    }
+
     @After
     fun tearDown() {
         MobHarnAccessibilityService.setTestInstance(null)

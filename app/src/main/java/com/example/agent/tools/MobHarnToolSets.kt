@@ -74,11 +74,16 @@ class AgentApprovalCoordinator(
         finally { synchronized(this) { response = null; _pendingApproval.value = null } }
     }
 
-    @Synchronized fun resolve(id: String, approved: Boolean, remember: Boolean = false) {
+    @Synchronized fun resolve(id: String, approved: Boolean, remember: Boolean = false,
+        onApprovedScreenAction: (() -> Unit)? = null) {
         val request = _pendingApproval.value ?: return
         val answer = response ?: return
         if (request.id != id || System.nanoTime() >= deadline || answer.isCompleted || (approved && !unlocked())) return
         if (remember && (!approved || request.rememberKey == null)) return
+        if (approved && onApprovedScreenAction != null && request.toolName in setOf(
+                "tap_screen_text", "tap_screen_coords", "type_screen_text", "scroll_screen")) {
+            onApprovedScreenAction()
+        }
         answer.complete(if (remember) Choice.SAVE else if (approved) Choice.ONCE else Choice.DENY)
     }
 

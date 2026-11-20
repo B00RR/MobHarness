@@ -68,6 +68,12 @@ class ApprovalActionReceiver : BroadcastReceiver() {
         val code = intent.action ?: return
         if (code !in setOf("allow", "save", "deny")) return
         if (code != "deny" && context.getSystemService(KeyguardManager::class.java)?.isDeviceLocked != false) return
-        MobHarnAppContainer.getInstance(context).approvalCoordinator.resolve(id, code != "deny", code == "save")
+        MobHarnAppContainer.getInstance(context).approvalCoordinator.resolve(id, code != "deny", code == "save") {
+            // A broadcast action can leave the shade in front of the authorized window.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                com.example.agent.phoneuse.MobHarnAccessibilityService.instance?.performGlobalAction(
+                    android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_DISMISS_NOTIFICATION_SHADE)
+            }
+        }
     }
 }

@@ -99,9 +99,10 @@ private fun describeToolAction(toolName: String): ToolPresentation = when (toolN
     "calculate_expression" -> ToolPresentation("Calcolo espressione", "Calcolo completato", Icons.Default.Calculate)
     "get_device_telemetry", "get_sensors", "get_sensor_snapshot", "get_approx_location", "read_clipboard" ->
         ToolPresentation("Lettura telemetria dispositivo", "Telemetria letta", Icons.Default.Smartphone)
-    "read_screen", "read_screen_ui", "tap_element", "tap_screen_text", "tap_coordinates", "tap_screen_coords",
+    "read_screen", "read_screen_ui" -> ToolPresentation("Lettura schermo", "Schermo letto", Icons.Default.TouchApp)
+    "tap_element", "tap_screen_text", "tap_coordinates", "tap_screen_coords",
     "type_text", "type_screen_text", "scroll_screen", "system_navigate", "phone_global_action" ->
-        ToolPresentation("Controllo schermo", "Azione schermo eseguita", Icons.Default.TouchApp)
+        ToolPresentation("Controllo schermo", "Azione inviata", Icons.Default.TouchApp)
     "save_memory", "remember_fact" -> ToolPresentation("Salvataggio in memoria", "Ricordo salvato", Icons.Default.Psychology)
     "delete_memory" -> ToolPresentation("Aggiornamento memoria", "Ricordo rimosso", Icons.Default.Psychology)
     "search_memory", "read_vault", "search_past_sessions" ->
@@ -113,6 +114,14 @@ private fun describeToolAction(toolName: String): ToolPresentation = when (toolN
         ToolPresentation("Auto-evoluzione harness", "Harness aggiornato", Icons.Default.Build)
     "schedule_automation" -> ToolPresentation("Pianificazione automazione", "Automazione pianificata", Icons.Default.Schedule)
     else -> ToolPresentation("Esecuzione $toolName", "Completato $toolName", Icons.Default.Build)
+}
+
+internal fun traceLabel(trace: ToolCallTrace): String = when (trace.status) {
+    "running" -> "${describeToolAction(trace.toolName).runningLabel}..."
+    "error" -> "Azione non riuscita"
+    "denied" -> "Azione non autorizzata"
+    "success" -> describeToolAction(trace.toolName).doneLabel
+    else -> "Esito sconosciuto"
 }
 
 private fun formatDurationSeconds(seconds: Int): String {
@@ -171,8 +180,8 @@ fun AgentActivityPanel(
             else "Catena di pensiero"
         }
         else -> {
-            if (traces.size == 1) describeToolAction(traces.first().toolName).doneLabel
-            else "${traces.size} azioni eseguite"
+            if (traces.size == 1) traceLabel(traces.first())
+            else "${traces.size} richieste"
         }
     }
 
@@ -467,7 +476,7 @@ private fun ActivityToolStepRow(trace: ToolCallTrace) {
                 }
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = if (isStepRunning) "${info.runningLabel}..." else info.doneLabel,
+                        text = traceLabel(trace),
                         style = MaterialTheme.typography.bodySmall,
                         color = if (isError) StatusError else MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
