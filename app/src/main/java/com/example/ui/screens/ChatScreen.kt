@@ -188,6 +188,7 @@ fun ChatScreen(
     var inputText by rememberSaveable { mutableStateOf("") }
     var showSkillSheet by remember { mutableStateOf(false) }
     var showAttachMenu by remember { mutableStateOf(false) }
+    var lastPhoneCheck by rememberSaveable { mutableStateOf<String?>(null) }
     var showAgentReport by remember { mutableStateOf(false) }
     var showTopOverflow by remember { mutableStateOf(false) }
     var pendingCameraPath by remember { mutableStateOf<String?>(null) }
@@ -296,7 +297,7 @@ fun ChatScreen(
         AlertDialog(
             onDismissRequest = { showAgentReport = false },
             title = { Text("Verifica telefono") },
-            text = { Text("${step.status}\n\nBackend: ${(engineStatus as? EngineStatus.Ready)?.activeBackend ?: "non pronto"}\n${inference ?: "Misure LiteRT non disponibili."}") },
+            text = { Text("${step.status}\n${lastPhoneCheck.orEmpty()}\n\nBackend: ${(engineStatus as? EngineStatus.Ready)?.activeBackend ?: "non pronto"}\n${inference ?: "Misure LiteRT non disponibili."}") },
             confirmButton = { Button(onClick = {
                 showAgentReport = false
                 val current = phoneStep(ToolGroup.PHONE_USE.id in viewModel.preferences.value.enabledToolGroups, MobHarnAccessibilityService.isConnected.value)
@@ -304,7 +305,13 @@ fun ChatScreen(
                 else when (step) {
                     PhoneStep.STUDIO -> onNavigateToStudio()
                     PhoneStep.SETTINGS -> MobHarnAccessibilityService.openAccessibilitySettings(context)
-                    PhoneStep.RECENTS -> onShowMessage(MobHarnAccessibilityService.instance?.performSystemNavigation("recents") ?: "Servizio disconnesso.")
+                    PhoneStep.RECENTS -> scope.launch {
+                        val result = MobHarnAccessibilityService.instance?.openVerifiedRecents {
+                            ToolGroup.PHONE_USE.id in viewModel.preferences.value.enabledToolGroups
+                        } ?: "Servizio disconnesso."
+                        lastPhoneCheck = "Ultima verifica: $result"
+                        onShowMessage(result)
+                    }
                 }
             }) { Text(step.label) } },
             dismissButton = { OutlinedButton(onClick = { showAgentReport = false }) { Text("Chiudi") } }
