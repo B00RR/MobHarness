@@ -22,7 +22,8 @@ class ShippedDatabaseUpgradeTest {
         GZIPInputStream(checkNotNull(javaClass.getResourceAsStream("/upgrade/mobharn-v120.db.gz"))).use { input ->
             file.outputStream().use { output -> input.copyTo(output) }
         }
-        MobHarnDatabase.open(context, file.name).use { room ->
+        val room = MobHarnDatabase.open(context, file.name)
+        try {
             val db = room.openHelper.writableDatabase
             fun scalar(sql: String) = db.query(sql).use { cursor ->
                 check(cursor.moveToFirst()); cursor.getString(0)
@@ -32,6 +33,6 @@ class ShippedDatabaseUpgradeTest {
             assertEquals("Rispondi Ambra.", scalar("SELECT instructionsMd FROM agent_skills WHERE enabled=1"))
             assertEquals("/test/modello.litertlm", scalar("SELECT filePath FROM model_profiles WHERE id=1"))
             assertEquals("testo vecchio", scalar("SELECT previousContent FROM workspace_snapshots WHERE id=1"))
-        }
+        } finally { room.close() }
     }
 }
