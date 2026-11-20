@@ -57,6 +57,7 @@ data class StreamChunk(
     val contextTokensMax: Int = 0
 )
 
+@OptIn(com.google.ai.edge.litertlm.ExperimentalApi::class)
 class LiteRtRuntimeManager(
     private val context: Context,
     private val toolkitRegistry: MobHarnToolkitRegistry
@@ -69,6 +70,9 @@ class LiteRtRuntimeManager(
 
     private val _status = MutableStateFlow<EngineStatus>(EngineStatus.Idle)
     val status: StateFlow<EngineStatus> = _status.asStateFlow()
+
+    private val _lastInference = MutableStateFlow<String?>(null)
+    val lastInference = _lastInference.asStateFlow()
 
     private var engine: Engine? = null
     @Volatile private var activeConversation: Conversation? = null
@@ -305,6 +309,7 @@ class LiteRtRuntimeManager(
                     maxNumTokens = attempt.maxNumTokens,
                     cacheDir = attempt.cacheDir
                 )
+                com.google.ai.edge.litertlm.ExperimentalFlags.enableBenchmark = true
                 candidate = Engine(config)
                 candidate!!.initialize()
                 candidate!!
@@ -493,6 +498,7 @@ class LiteRtRuntimeManager(
 
         idleKvTrimJob?.cancel()
         backgroundUnloadJob?.cancel()
+        _lastInference.value = null
         toolkitRegistry.monitor.beginTurn()
         isTurnActive = true
 
@@ -615,7 +621,9 @@ class LiteRtRuntimeManager(
 
             suspend fun collectMessageStream(
                 flowToCollect: Flow<Message>,
-                streamParser: ThinkingStreamParser
+                streamParser: ThinkingStreamParser,
+                source: Conversation,
+                pass: String
             ) {
                 flowToCollect.collect { chunkMsg ->
                     // Dynamically react the instant the user switches to another app (or comes back)
@@ -746,6 +754,9 @@ class LiteRtRuntimeManager(
                         )
                     )
                 }
+                _lastInference.value = runCatching { source.getBenchmarkInfo() }.getOrNull()?.let {
+                    formatInferenceStats(pass, it.timeToFirstTokenInSecond, it.lastPrefillTokensPerSecond, it.lastDecodeTokensPerSecond)
+                }
             }
 
             var recoveredToolCalls: List<ParsedToolCall> = emptyList()
@@ -777,7 +788,7 @@ class LiteRtRuntimeManager(
                         effectiveThinkingConfig
                     )
                 }
-                collectMessageStream(messageFlow, parser)
+                collectMessageStream(messageFlow, parser, conversation, "risposta")
 
                 // Check if raw <|tool_call>...<tool_call|> blocks leaked into text without throwing
                 val leakedBlocks = parser.drainCapturedToolBlocks()
@@ -865,7 +876,7 @@ class LiteRtRuntimeManager(
                         policy.maxOutputTokens,
                         noThinkingConfig
                     )
-                    collectMessageStream(synthFlow, synthParser)
+                    collectMessageStream(synthFlow, synthParser, synthConv, "sintesi")
                 } finally {
                     runCatching { synthConv.close() }
                     conversationNeedsReset = true
@@ -916,7 +927,7 @@ class LiteRtRuntimeManager(
                         policy.maxOutputTokens,
                         noThinkingConfig
                     )
-                    collectMessageStream(fallbackFlow, fallbackParser)
+                    collectMessageStream(fallbackFlow, fallbackParser, fallbackConv, "recupero")
                 } finally {
                     runCatching { fallbackConv.close() }
                     conversationNeedsReset = true
@@ -940,6 +951,7 @@ class LiteRtRuntimeManager(
     }
 
     private fun unloadInternal(rememberForAutoReload: Boolean) {
+        _lastInference.value = null
         if (rememberForAutoReload && loadedProfile != null) {
             lastAutoUnloadedProfile = loadedProfile
         } else if (!rememberForAutoReload) {

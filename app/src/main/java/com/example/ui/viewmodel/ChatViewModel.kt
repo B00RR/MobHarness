@@ -89,6 +89,7 @@ class ChatViewModel(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), AppPreferences())
 
     val engineStatus: StateFlow<EngineStatus> = runtime.status
+    val lastInference = runtime.lastInference
 
     val pendingApproval: StateFlow<PendingToolApproval?> = container.approvalCoordinator.pendingApproval
 
