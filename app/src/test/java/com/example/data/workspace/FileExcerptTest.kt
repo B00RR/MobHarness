@@ -25,6 +25,17 @@ class FileExcerptTest {
         assertTrue(beyond.contains("parziale", ignoreCase = true))
     }
 
+    @Test fun limitsSourceBytesAndNumberOfReturnedLines() {
+        val giant = ByteArray(110_000) { 65 }.inputStream()
+        readExcerpt(giant, 110_000, 100, 100, "test")
+        org.junit.Assert.assertEquals(65_536, 110_000 - giant.available())
+        val many = "abc\n".repeat(30_000).toByteArray()
+        val input = many.inputStream()
+        val excerpt = readExcerpt(input, many.size.toLong(), 1, Int.MAX_VALUE, "test")
+        org.junit.Assert.assertEquals(200, excerpt.lineSequence().count { " | " in it })
+        assertTrue(many.size - input.available() <= 4096)
+    }
+
     @Test fun rangePastEofNeverReturnsAnotherLine() = runBlocking {
         val ws = WorkspaceManager(ApplicationProvider.getApplicationContext<Context>())
         ws.writeFile("fixture", "tiny.txt", "prima\r\nseconda").getOrThrow()

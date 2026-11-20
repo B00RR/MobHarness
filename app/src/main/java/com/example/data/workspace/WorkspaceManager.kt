@@ -21,6 +21,35 @@ data class CodeSearchMatch(
     val lineContent: String
 )
 
+internal fun readExcerpt(input: java.io.InputStream, size: Long, start: Int, end: Int, path: String): String {
+    require(start > 0 && end >= start) { "Intervallo di righe non valido" }
+    val last = minOf(end.toLong(), start.toLong() + 199).toInt()
+    val bytes = java.io.ByteArrayOutputStream()
+    val chunk = ByteArray(4096)
+    var newlines = 0
+    while (newlines < last && bytes.size() < 65_536) {
+        val n = input.read(chunk, 0, minOf(chunk.size, 65_536 - bytes.size()))
+        if (n <= 0) break
+        bytes.write(chunk, 0, n)
+        for (i in 0 until n) if (chunk[i] == 10.toByte()) newlines++
+    }
+    val more = bytes.size().toLong() < size
+    val prefix = bytes.toString("UTF-8")
+    // Don't present a split UTF-8 character or incomplete final line as file content.
+    val complete = if (more) prefix.substring(0, prefix.lastIndexOfAny(charArrayOf('\n', '\r')) + 1) else prefix
+    return complete.reader().buffered().useLines { lines ->
+        val rows = lines.drop(start - 1).iterator()
+        val content = buildString {
+            for (i in start..last) {
+                if (!rows.hasNext()) break
+                append("\n${i.toString().padStart(4)} | ${rows.next()}")
+            }
+        }
+        val note = if (more || start > 1 || rows.hasNext()) " (lettura parziale)" else ""
+        "File: $path$note" + content.ifEmpty { "\nNessuna riga completa nell'intervallo letto." }
+    }
+}
+
 class WorkspaceManager(context: Context) {
 
     private val workspaceRoot: File = File(context.filesDir, "workspace").apply { mkdirs() }
@@ -85,16 +114,12 @@ class WorkspaceManager(context: Context) {
         startLine: Int = 1,
         endLine: Int = 200
     ): Result<String> = withContext(Dispatchers.IO) {
-        val content = readFile(projectName, relativePath)
-            ?: return@withContext Result.failure(IllegalArgumentException("File non trovato: $relativePath"))
-        val lines = content.lines()
-        if (lines.isEmpty()) return@withContext Result.success("(file vuoto)")
-        val safeStart = startLine.coerceIn(1, lines.size)
-        val safeEnd = endLine.coerceIn(safeStart, lines.size)
-        val formatted = (safeStart..safeEnd).joinToString("\n") { lineNo ->
-            "${lineNo.toString().padStart(4)} | ${lines[lineNo - 1]}"
+        runCatching {
+            val file = requireNotNull(resolveSafeFile(projectName, relativePath)?.takeIf { it.isFile }) {
+                "File non trovato: $relativePath"
+            }
+            file.inputStream().use { input -> readExcerpt(input, input.channel.size(), startLine, endLine, relativePath) }
         }
-        Result.success("File: $relativePath (righe $safeStart-$safeEnd di ${lines.size})\n$formatted")
     }
 
     suspend fun writeFile(
