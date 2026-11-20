@@ -143,6 +143,28 @@ class ScreenTargetResolutionTest {
         }
     }
 
+    @Test fun currentInputValueIsNotAnElementLabel() {
+        val root = makeNode(className = "android.widget.LinearLayout")
+        val edit = makeNode(text = "fixture-private", hint = "Note", editable = true)
+        attach(root, edit)
+        currentRoot = root
+        service.captureScreenTree()
+        assertNull(service.prepare("input", "fixture-private"))
+        assertNotNull(service.prepare("input", "Note"))
+    }
+
+    @Test fun twoTargetsFromOneObservationCannotBothDispatch() = runBlocking {
+        val root = makeNode(className = "android.widget.LinearLayout")
+        attach(root, makeNode(text = "Avanti", clickable = true))
+        currentRoot = root
+        service.captureScreenTree()
+        val first = requireNotNull(service.prepare("text", "Avanti"))
+        val second = requireNotNull(service.prepare("text", "Avanti"))
+        service.applyTarget(first)
+        assertTrue(runCatching { service.applyTarget(second) }.isFailure)
+        assertEquals(1, dispatchedActions.size)
+    }
+
     private fun activeNotificationsCount(): Int {
         shadowOf(Looper.getMainLooper()).idle()
         val mgr = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager

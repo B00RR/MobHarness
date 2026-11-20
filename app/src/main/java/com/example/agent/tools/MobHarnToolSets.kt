@@ -1113,7 +1113,7 @@ class MobHarnToolkitRegistry(
             }
             "tap_screen_text", "tap_element" -> gated("phone_use") {
                 phoneUseTools.tap_screen_text(
-                    targetText = str("targetText", "target_text", "text", "label"),
+                    targetText = str("targetText", "target_text", "text", "label", allowSingleArgFallback = false),
                     contextHint = str("contextHint", "context_hint", "context", "container", allowSingleArgFallback = false)
                 )
             }
@@ -1124,9 +1124,10 @@ class MobHarnToolkitRegistry(
                 )
             }
             "type_screen_text", "type_text" -> gated("phone_use") {
+                if (args["text"] !is String && args["value"] !is String) return@gated "Argomento text mancante. Nessuna azione."
                 phoneUseTools.type_screen_text(
                     fieldHint = str("fieldHint", "field_hint", "hint", allowSingleArgFallback = false),
-                    text = str("text", "value"),
+                    text = str("text", "value", allowSingleArgFallback = false),
                     contextHint = str("contextHint", "context_hint", "context", "container", allowSingleArgFallback = false)
                 )
             }

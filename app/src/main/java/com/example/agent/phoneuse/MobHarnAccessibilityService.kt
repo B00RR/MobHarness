@@ -48,7 +48,7 @@ class MobHarnAccessibilityService : AccessibilityService() {
     }
 
     internal data class WindowKey(val pkg: String, val id: Int)
-    @Volatile private var observed: WindowKey? = null
+    private val observed = java.util.concurrent.atomic.AtomicReference<WindowKey?>(null)
 
     private fun AccessibilityNodeInfo.windowKey() = WindowKey(packageName?.toString().orEmpty(), windowId)
 
@@ -120,7 +120,7 @@ class MobHarnAccessibilityService : AccessibilityService() {
                     if (collected.size >= 8) break
                 }
             }
-            if (collected.size >= 8) break
+            if (collected.isNotEmpty()) break // Keep labels local to the nearest identifying row.
             ancestor = ancestor.parent
             hops++
         }
@@ -146,10 +146,9 @@ class MobHarnAccessibilityService : AccessibilityService() {
     }
 
     fun captureScreenTree(maxNodes: Int = 80): String {
-        observed = null
+        observed.set(null)
         val root = activeApp() ?: error("Finestra applicativa non disponibile, bloccata o protetta.")
-        observed = root.windowKey()
-        return renderScreenTree(root, maxNodes)
+        return renderScreenTree(root, maxNodes).also { observed.set(root.windowKey()) }
     }
 
     internal fun renderScreenTree(root: AccessibilityNodeInfo, maxNodes: Int = 80): String {
@@ -267,10 +266,10 @@ class MobHarnAccessibilityService : AccessibilityService() {
         val actionValue: String = ""
     )
 
-    private fun nodeOwnLabels(n: AccessibilityNodeInfo, includeEditableText: Boolean = true): List<String> {
+    private fun nodeOwnLabels(n: AccessibilityNodeInfo): List<String> {
         if (n.isPassword) return emptyList()
         return listOfNotNull(
-            if (includeEditableText || !n.isEditable) n.text else null,
+            if (!n.isEditable) n.text else null,
             n.contentDescription,
             if (Build.VERSION.SDK_INT >= 26) n.hintText else null,
             n.viewIdResourceName
@@ -280,7 +279,7 @@ class MobHarnAccessibilityService : AccessibilityService() {
     private fun matchesContext(node: AccessibilityNodeInfo, contextHint: String, allowDescendants: Boolean = false): Boolean {
         val hint = contextHint.trim()
         if (hint.isBlank()) return true
-        val ownAndAncestors = nodeOwnLabels(node, includeEditableText = false) + contextLabelsFor(node)
+        val ownAndAncestors = nodeOwnLabels(node) + contextLabelsFor(node)
         if (ownAndAncestors.any { it.equals(hint, ignoreCase = true) || it.contains(hint, ignoreCase = true) }) {
             return true
         }
@@ -327,7 +326,7 @@ class MobHarnAccessibilityService : AccessibilityService() {
         fun visit(n: AccessibilityNodeInfo, depth: Int) {
             if (--budget < 0 || depth > 24 || n.isPassword) return
             val rect = Rect().also { n.getBoundsInScreen(it) }
-            val labels = nodeOwnLabels(n, includeEditableText = mode == "input")
+            val labels = nodeOwnLabels(n)
             val hit = when (mode) {
                 "text" -> q.isNotBlank() &&
                     labels.any { it.equals(q, true) } &&
@@ -438,7 +437,7 @@ class MobHarnAccessibilityService : AccessibilityService() {
                 "Finestra applicativa non disponibile, bloccata o protetta.",
                 FailureKind.WINDOW_UNAVAILABLE
             )
-        val lastObserved = observed
+        val lastObserved = observed.get()
             ?: return TargetResolution.Invalid(
                 "Nessuna lettura recente dello schermo. Chiama prima read_screen_ui.",
                 FailureKind.SCREEN_NOT_READ
@@ -461,7 +460,7 @@ class MobHarnAccessibilityService : AccessibilityService() {
                 val n = matches.single()
                 TargetResolution.Unique(
                     Target(
-                        window = root.windowKey(),
+                        window = lastObserved,
                         node = n,
                         label = signature(n),
                         bounds = Rect().also { n.getBoundsInScreen(it) },
@@ -520,7 +519,8 @@ class MobHarnAccessibilityService : AccessibilityService() {
         } ?: error("Finestra autorizzata non visibile. Nessuna azione. Chiudi le notifiche e rileggi la schermata.")
         val n = requireNotNull(resolveTarget(root, t)) { "Il bersaglio è cambiato. Nessuna azione." }
         check(activeApp()?.windowKey() == t.window) { "Finestra cambiata." }
-        observed = null // Require a fresh read before the next action.
+        // Object identity binds the consent to this specific read, even in the same window.
+        check(observed.compareAndSet(t.window, null)) { "Lettura già usata o superata. Nessuna azione." }
         when (t.mode) {
             "input" -> {
                 val args = Bundle().apply {
