@@ -17,6 +17,15 @@ class TwoScreenProbe {
         val app = MobHarnAppContainer.getInstance(inst.targetContext)
         val tools = app.toolkitRegistry.phoneUseTools
         val pkg = inst.context.packageName
+        fun shell(command: String): String = ParcelFileDescriptor.AutoCloseInputStream(automation.executeShellCommand(command)).bufferedReader().use { it.readText() }
+        check(shell("getprop ro.kernel.qemu").trim() == "1") { "Emulator only" }
+        val component = android.content.ComponentName(inst.targetContext, MobHarnAccessibilityService::class.java).flattenToString()
+        shell("settings put secure enabled_accessibility_services $component")
+        shell("settings put secure accessibility_enabled 1")
+        check(withTimeoutOrNull(12_000) { MobHarnAccessibilityService.isConnected.first { it } } == true) {
+            "Service not connected: " + shell("dumpsys accessibility").lineSequence().filter { it.contains("Service", true) || it.contains("MobHarn") }.take(25).joinToString(";")
+        }
+
         suspend fun observed(label: String): String {
             var last = "service not bound"
             val ready = withTimeoutOrNull(12_000) {
