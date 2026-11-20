@@ -16,11 +16,28 @@ import com.example.R
 import com.example.agent.ThermalAndMemoryGuard
 import com.example.agent.ThermalLevel
 import com.example.agent.tools.AndroidSystemActions
+import com.example.data.db.AutomationTaskEntity
 import com.example.data.db.MobHarnDatabase
 import com.example.data.vault.MarkdownVaultManager
 import com.example.data.workspace.WorkspaceManager
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+
+sealed interface AutomationTaskOutcome {
+    val summary: String
+    val isSuccess: Boolean
+
+    data class Success(override val summary: String) : AutomationTaskOutcome {
+        override val isSuccess: Boolean get() = true
+    }
+
+    data class Failure(override val summary: String, val cause: Throwable? = null) : AutomationTaskOutcome {
+        override val isSuccess: Boolean get() = false
+    }
+}
 
 class AutomationWorker(
     appContext: Context,
@@ -55,45 +72,14 @@ class AutomationWorker(
         val vault = MarkdownVaultManager(applicationContext)
         val workspace = WorkspaceManager(applicationContext)
 
-        val resultSummary = try {
-            runCatching {
-                when (task.actionType) {
-                    "TELEMETRY_CHECK" -> system.getTelemetryReport()
-                    "WEB_MONITOR" -> {
-                        if (task.targetUrl.isNotBlank()) system.fetchWebpage(task.targetUrl, 1200)
-                        else system.webSearch(task.prompt)
-                    }
-                    "MEMORY_DIGEST" -> {
-                        val docs = vault.readVault()
-                        val memories = db.memoryDao().getAllMemories()
-                        "Digest memoria: ${memories.size} fatti persistenti (~${docs.estimatedSystemTokens} tok nel prompt di sistema)."
-                    }
-                    "WORKSPACE_AUDIT" -> {
-                        val projects = workspace.listProjects()
-                        val summary = projects.joinToString("\n") { p -> "• $p" }
-                        "Audit Coding Workspace (${projects.size} progetti):\n$summary"
-                    }
-                    else -> { // BRIEFING
-                        val hw = system.getHardwareSummary()
-                        val memCount = db.memoryDao().getAllMemories().size
-                        "Briefing MobHarn: Batteria ${hw.batteryPercent}%, RAM libera ${"%.1f".format(hw.availableRamGb)} GB, Rete ${hw.networkStatus}, $memCount memorie attive. Prompt: ${task.prompt}"
-                    }
-                }
-            }.getOrElse { e ->
-                "Errore durante automazione '${task.name}': ${e.message}"
-            }
-        } finally {
-            system.evictIdleConnections()
-        }
-
-        db.automationDao().updateRunResult(
-            id = task.id,
-            runAt = System.currentTimeMillis(),
-            result = resultSummary.take(1500)
+        return@withContext executeTask(
+            task = task,
+            system = system,
+            vault = vault,
+            workspace = workspace,
+            db = db,
+            onNotification = { id, title, body -> postCompletionNotification(id, title, body) }
         )
-
-        postCompletionNotification(task.id.toInt(), task.name, resultSummary.take(180))
-        Result.success()
     }
 
     private fun postCompletionNotification(id: Int, title: String, body: String) {
@@ -151,6 +137,59 @@ class AutomationWorker(
                 }
             }
             return null
+        }
+
+        internal fun evaluateOutcomeResult(outcome: AutomationTaskOutcome): Result {
+            return Result.success()
+        }
+
+        internal suspend fun executeTask(
+            task: AutomationTaskEntity,
+            system: AndroidSystemActions,
+            vault: MarkdownVaultManager,
+            workspace: WorkspaceManager,
+            db: MobHarnDatabase,
+            onNotification: (id: Int, title: String, body: String) -> Unit = { _, _, _ -> }
+        ): Result {
+            val resultSummary = try {
+                runCatching {
+                    when (task.actionType) {
+                        "TELEMETRY_CHECK" -> system.getTelemetryReport()
+                        "WEB_MONITOR" -> {
+                            if (task.targetUrl.isNotBlank()) system.fetchWebpage(task.targetUrl, 1200)
+                            else system.webSearch(task.prompt)
+                        }
+                        "MEMORY_DIGEST" -> {
+                            val docs = vault.readVault()
+                            val memories = db.memoryDao().getAllMemories()
+                            "Digest memoria: ${memories.size} fatti persistenti (~${docs.estimatedSystemTokens} tok nel prompt di sistema)."
+                        }
+                        "WORKSPACE_AUDIT" -> {
+                            val projects = workspace.listProjects()
+                            val summary = projects.joinToString("\n") { p -> "• $p" }
+                            "Audit Coding Workspace (${projects.size} progetti):\n$summary"
+                        }
+                        else -> { // BRIEFING
+                            val hw = system.getHardwareSummary()
+                            val memCount = db.memoryDao().getAllMemories().size
+                            "Briefing MobHarn: Batteria ${hw.batteryPercent}%, RAM libera ${"%.1f".format(hw.availableRamGb)} GB, Rete ${hw.networkStatus}, $memCount memorie attive. Prompt: ${task.prompt}"
+                        }
+                    }
+                }.getOrElse { e ->
+                    "Errore durante automazione '${task.name}': ${e.message}"
+                }
+            } finally {
+                system.evictIdleConnections()
+            }
+
+            db.automationDao().updateRunResult(
+                id = task.id,
+                runAt = System.currentTimeMillis(),
+                result = resultSummary.take(1500)
+            )
+
+            onNotification(task.id.toInt(), task.name, resultSummary.take(180))
+            return Result.success()
         }
     }
 }

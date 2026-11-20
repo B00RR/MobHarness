@@ -52,6 +52,39 @@ data class DeviceHardwareSummary(
     val nativeHeapMb: Int = 0
 )
 
+sealed interface WebResult {
+    val text: String
+
+    data class Success(val content: String) : WebResult {
+        override val text: String get() = content
+    }
+
+    sealed class Failure(val error: String, val cause: Throwable? = null) : WebResult, Exception(error, cause) {
+        override val text: String get() = error
+
+        class HttpError(val code: Int, val url: String) :
+            Failure("Errore HTTP $code su $url")
+
+        class NetworkError(val url: String, cause: Throwable) :
+            Failure("Impossibile scaricare $url: ${cause.message}", cause)
+
+        class InvalidUrl(val url: String) :
+            Failure("URL non valido o vuoto.")
+
+        class NonTextContent(val contentType: String, val url: String) :
+            Failure("Contenuto non testuale ($contentType) su $url: impossibile estrarre testo.")
+
+        class EmptyContent(val url: String) :
+            Failure("Pagina scaricata ($url), ma nessun testo leggibile estratto.")
+
+        class EmptyQuery :
+            Failure("Query di ricerca vuota.")
+
+        class NoResults(val query: String) :
+            Failure("Nessun risultato web trovato per '$query'. Verifica la connessione Internet del dispositivo.")
+    }
+}
+
 class AndroidSystemActions(private val context: Context) {
 
     private var httpClientInitialized = false
@@ -368,9 +401,9 @@ class AndroidSystemActions(private val context: Context) {
         return launchIntentSafely(intent, "Impostazioni Android aperte ($section).")
     }
 
-    suspend fun webSearch(query: String): String = withContext(Dispatchers.IO) {
+    suspend fun webSearchOutcome(query: String): WebResult = withContext(Dispatchers.IO) {
         val cleanQuery = query.trim()
-        if (cleanQuery.isBlank()) return@withContext "Query di ricerca vuota."
+        if (cleanQuery.isBlank()) return@withContext WebResult.Failure.EmptyQuery()
 
         val encoded = URLEncoder.encode(cleanQuery, "UTF-8")
         val wikiUa = "MobHarnAndroid/1.1 (https://mobharn.local; on-device assistant)"
@@ -551,24 +584,34 @@ class AndroidSystemActions(private val context: Context) {
         }
 
         if (sections.isEmpty()) {
-            "Nessun risultato web trovato per '$cleanQuery'. Verifica la connessione Internet del dispositivo."
+            WebResult.Failure.NoResults(cleanQuery)
         } else {
-            buildString {
+            val content = buildString {
                 appendLine("Risultati per \"$cleanQuery\":")
                 append(sections.joinToString("\n\n"))
             }.take(1450).trimEnd()
+            WebResult.Success(content)
         }
     }
 
-    suspend fun fetchWebpage(url: String, maxChars: Int = 3500): String = withContext(Dispatchers.IO) {
+    suspend fun webSearchOrThrow(query: String): String =
+        when (val outcome = webSearchOutcome(query)) {
+            is WebResult.Success -> outcome.content
+            is WebResult.Failure -> throw outcome
+        }
+
+    suspend fun webSearch(query: String): String =
+        webSearchOutcome(query).text
+
+    suspend fun fetchWebpageOutcome(url: String, maxChars: Int = 3500): WebResult = withContext(Dispatchers.IO) {
         val rawUrl = url.trim().trim('<', '>', '"', '\'')
-        if (rawUrl.isBlank()) return@withContext "URL non valido o vuoto."
+        if (rawUrl.isBlank()) return@withContext WebResult.Failure.InvalidUrl(url)
         val clean = if (rawUrl.startsWith("http://", true) || rawUrl.startsWith("https://", true)) {
             rawUrl
         } else {
             "https://$rawUrl"
         }
-        runCatching {
+        try {
             val request = Request.Builder()
                 .url(clean)
                 .header("User-Agent", "Mozilla/5.0 (Linux; Android 15; Pixel 10 Pro XL) AppleWebKit/537.36 Chrome/134.0.0.0 Mobile Safari/537.36")
@@ -576,7 +619,7 @@ class AndroidSystemActions(private val context: Context) {
                 .header("Accept-Language", "it-IT,it;q=0.9,en;q=0.8")
                 .build()
             httpClient.newCall(request).execute().use { resp ->
-                if (!resp.isSuccessful) return@use "Errore HTTP ${resp.code} su $clean"
+                if (!resp.isSuccessful) return@use WebResult.Failure.HttpError(resp.code, clean)
                 val contentType = resp.header("Content-Type").orEmpty().lowercase()
                 val isReadableText = contentType.isBlank() ||
                     contentType.startsWith("text/") ||
@@ -584,7 +627,7 @@ class AndroidSystemActions(private val context: Context) {
                     contentType.contains("xml") ||
                     contentType.contains("xhtml")
                 if (!isReadableText) {
-                    return@use "Contenuto non testuale ($contentType) su $clean: impossibile estrarre testo."
+                    return@use WebResult.Failure.NonTextContent(contentType, clean)
                 }
                 // Cap download to 256 KB so multi-megabyte pages never spike device RAM
                 val bodyBytes = resp.body?.source()?.use { source ->
@@ -600,15 +643,26 @@ class AndroidSystemActions(private val context: Context) {
                     WebSearchParser.extractMainWebpageText(raw, maxChars)
                 }
                 if (cleaned.isBlank()) {
-                    "Pagina scaricata ($clean), ma nessun testo leggibile estratto."
+                    WebResult.Failure.EmptyContent(clean)
                 } else {
-                    "Contenuto estratto da $clean:\n$cleaned"
+                    WebResult.Success("Contenuto estratto da $clean:\n$cleaned")
                 }
             }
-        }.getOrElse { e ->
-            "Impossibile scaricare $clean: ${e.message}"
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            throw c
+        } catch (e: Throwable) {
+            WebResult.Failure.NetworkError(clean, e)
         }
     }
+
+    suspend fun fetchWebpageOrThrow(url: String, maxChars: Int = 3500): String =
+        when (val outcome = fetchWebpageOutcome(url, maxChars)) {
+            is WebResult.Success -> outcome.content
+            is WebResult.Failure -> throw outcome
+        }
+
+    suspend fun fetchWebpage(url: String, maxChars: Int = 3500): String =
+        fetchWebpageOutcome(url, maxChars).text
 
     private fun launchIntentSafely(intent: Intent, successMessage: String): String {
         return runCatching {
