@@ -267,6 +267,7 @@ class PhoneUseToolSet(
     ) {
         val svc = requireService()
             ?: return@executeTracked accessRequired
-        svc.performSystemNavigation(action)
+        if (action.trim().lowercase() in setOf("recents", "recenti")) svc.openVerifiedRecents()
+        else svc.performSystemNavigation(action)
     }
 }

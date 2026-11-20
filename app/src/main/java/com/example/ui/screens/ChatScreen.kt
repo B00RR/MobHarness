@@ -2,6 +2,9 @@ package com.example.ui.screens
 
 import com.example.agent.phoneuse.MobHarnAccessibilityService
 import com.example.data.prefs.ToolGroup
+import com.example.agent.ContextAndMemoryEngine
+import com.example.agent.PhoneStep
+import com.example.agent.phoneStep
 import android.Manifest
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -185,6 +188,8 @@ fun ChatScreen(
     var inputText by rememberSaveable { mutableStateOf("") }
     var showSkillSheet by remember { mutableStateOf(false) }
     var showAttachMenu by remember { mutableStateOf(false) }
+    var lastPhoneCheck by rememberSaveable { mutableStateOf<String?>(null) }
+    var showAgentReport by remember { mutableStateOf(false) }
     var showTopOverflow by remember { mutableStateOf(false) }
     var pendingCameraPath by remember { mutableStateOf<String?>(null) }
 
@@ -286,6 +291,33 @@ fun ChatScreen(
         )
     }
 
+    if (showAgentReport) {
+        val step = phoneStep(ToolGroup.PHONE_USE.id in prefs.enabledToolGroups, accessibilityConnected)
+        val inference by viewModel.lastInference.collectAsStateWithLifecycle()
+        AlertDialog(
+            onDismissRequest = { showAgentReport = false },
+            title = { Text("Verifica telefono") },
+            text = { Text("${step.status}\n${lastPhoneCheck.orEmpty()}\n\nBackend: ${(engineStatus as? EngineStatus.Ready)?.activeBackend ?: "non pronto"}\n${inference ?: "Misure LiteRT non disponibili."}") },
+            confirmButton = { Button(onClick = {
+                showAgentReport = false
+                val current = phoneStep(ToolGroup.PHONE_USE.id in viewModel.preferences.value.enabledToolGroups, MobHarnAccessibilityService.isConnected.value)
+                if (current != step) onShowMessage("Stato cambiato: ${current.status}")
+                else when (step) {
+                    PhoneStep.STUDIO -> onNavigateToStudio()
+                    PhoneStep.SETTINGS -> MobHarnAccessibilityService.openAccessibilitySettings(context)
+                    PhoneStep.RECENTS -> scope.launch {
+                        val result = MobHarnAccessibilityService.instance?.openVerifiedRecents {
+                            ToolGroup.PHONE_USE.id in viewModel.preferences.value.enabledToolGroups
+                        } ?: "Servizio disconnesso."
+                        lastPhoneCheck = "Ultima verifica: $result"
+                        onShowMessage(result)
+                    }
+                }
+            }) { Text(step.label) } },
+            dismissButton = { OutlinedButton(onClick = { showAgentReport = false }) { Text("Chiudi") } }
+        )
+    }
+
     if (showSkillSheet) {
         ModalBottomSheet(onDismissRequest = { showSkillSheet = false }) {
             Column(
@@ -295,7 +327,9 @@ fun ChatScreen(
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Text("Scegli una Skill", style = MaterialTheme.typography.titleLarge)
-                val enabledSkills = skills.filter { it.enabled }
+                val enabledSkills = remember(skills, inputText) {
+                    ContextAndMemoryEngine.rankSkillsForPrompt(inputText, skills, limit = skills.size)
+                }
                 if (enabledSkills.isEmpty()) {
                     Text(
                         "Nessuna skill attiva. Puoi crearne una nella scheda Memoria.",
@@ -539,6 +573,10 @@ fun ChatScreen(
                                 },
                                 modifier = Modifier.testTag("compact_context_button")
                             )
+                            DropdownMenuItem(text = { Text("Verifica telefono") }, onClick = {
+                                showTopOverflow = false
+                                showAgentReport = true
+                            })
                             if (!accessibilityConnected && ToolGroup.PHONE_USE.id in prefs.enabledToolGroups) {
                                 DropdownMenuItem(text = { Text("Apri Accessibilità") }, onClick = {
                                     showTopOverflow = false
@@ -725,6 +763,15 @@ fun ChatScreen(
                     }
                 }
 
+                val suggestion = remember(inputText, skills, prefs.enabledToolGroups) {
+                    if (ToolGroup.MEMORY.id !in prefs.enabledToolGroups || inputText.isBlank() || '/' in inputText) null
+                    else ContextAndMemoryEngine.rankSkillsForPrompt(inputText.take(512), skills, 1, matchesOnly = true).firstOrNull()
+                }
+                if (suggestion != null && !uiState.isGenerating) {
+                    OutlinedButton(onClick = { inputText = "Usa la skill /${suggestion.slug}: $inputText" }) {
+                        Text("Usa procedura: ${suggestion.title}", maxLines = 1)
+                    }
+                }
                 Surface(
                     color = MaterialTheme.colorScheme.surfaceContainerHigh,
                     shape = RoundedCornerShape(28.dp),
@@ -1092,7 +1139,7 @@ private fun ChatMessageBubble(
                 }
                 if (message.tokensPerSec > 0f) {
                     Text(
-                        text = String.format(Locale.US, "%.1f tok/s", message.tokensPerSec),
+                        text = String.format(Locale.US, "≈%.1f tok/s", message.tokensPerSec),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f)
                     )
@@ -1138,7 +1185,7 @@ private fun StreamingAssistantBlock(
         if (tps > 0f || !thermalNote.isNullOrBlank()) {
             Text(
                 text = buildString {
-                    if (tps > 0f) append(String.format(Locale.US, "%.1f tok/s", tps))
+                    if (tps > 0f) append(String.format(Locale.US, "≈%.1f tok/s", tps))
                     if (!thermalNote.isNullOrBlank()) {
                         if (isNotEmpty()) append(" • ")
                         append(thermalNote)

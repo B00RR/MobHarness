@@ -211,6 +211,20 @@ class MobHarnAccessibilityService : AccessibilityService() {
         else "Scorrimento '$direction' non riuscito."
     }
 
+    private val recentsRoutine = RecentsRoutine()
+
+    suspend fun openVerifiedRecents(stillAllowed: () -> Boolean = { true }): String = recentsRoutine.run(
+        connected = { instance === this && isConnected.value && stillAllowed() },
+        open = { performGlobalAction(GLOBAL_ACTION_RECENTS) },
+        visible = {
+            val root = rootInActiveWindow
+            val pkg = root?.packageName?.toString()
+            // Only public launcher markers. Do not inspect labels, screenshots or individual cards.
+            pkg in setOf("com.google.android.apps.nexuslauncher", "com.android.launcher3", "com.android.launcher3.lineage") &&
+                root?.findAccessibilityNodeInfosByViewId("$pkg:id/overview_panel")?.any { it.isVisibleToUser } == true
+        }
+    )
+
     fun performSystemNavigation(actionName: String): String {
         val action = when (actionName.lowercase().trim()) {
             "back", "indietro" -> GLOBAL_ACTION_BACK

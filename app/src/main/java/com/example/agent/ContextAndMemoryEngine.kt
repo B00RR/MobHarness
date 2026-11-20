@@ -234,24 +234,17 @@ object ContextAndMemoryEngine {
     fun rankSkillsForPrompt(
         prompt: String,
         skills: List<AgentSkillEntity>,
-        limit: Int = 8
+        limit: Int = 8,
+        matchesOnly: Boolean = false
     ): List<AgentSkillEntity> {
-        if (skills.size <= limit) return skills
-        val queryTokens = tokenize(prompt).distinct()
-        if (queryTokens.isEmpty()) return skills.take(limit)
-        val queryRoots = queryTokens.map(::stemRoot).toSet()
-
-        return skills.map { skill ->
-            val skillTokens = tokenize("${skill.slug.replace('_', ' ')} ${skill.title} ${skill.description}")
-            val matchScore = queryRoots.sumOf { root ->
-                if (skillTokens.any { stemRoot(it) == root }) 2.0 else 0.0
-            }
-            val usageBonus = ln(skill.usageCount.coerceAtLeast(0) + 1.0) * 0.6
-            skill to (matchScore + usageBonus)
-        }
-            .sortedByDescending { it.second }
-            .take(limit)
-            .map { it.first }
+        val roots = tokenize(prompt).map(::stemRoot).toSet()
+        return skills.asSequence().filter { it.enabled }.map { skill ->
+            val words = tokenize("${skill.slug.replace('_', ' ')} ${skill.title} ${skill.description}").map(::stemRoot).toSet()
+            skill to roots.count { it in words }
+        }.filter { !matchesOnly || it.second > 0 }
+            .sortedWith(compareByDescending<Pair<AgentSkillEntity, Int>> { it.second }
+                .thenByDescending { it.first.usageCount }.thenBy { it.first.slug })
+            .take(limit.coerceAtLeast(0)).map { it.first }.toList()
     }
 
     /**
