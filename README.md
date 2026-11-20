@@ -1,8 +1,8 @@
-# MobHarn `v1.2.0`
+# MobHarn
 
 **MobHarn** è un'applicazione Android (Kotlin + Jetpack Compose) progettata come **agent harness AI completamente on-device**, alimentata da **LiteRT-LM** (Google AI Edge) e modelli locali `.litertlm` (come **Gemma 4**).
 
-> **Versione corrente:** `v1.2.0` (`versionCode 5`) — apprendimento locale con anteprima, approvazioni da notifica e controllo dei bersagli sullo schermo.
+> **Su `main`:** 1.3.0 (`versionCode 6`). **Ultima release pubblicata:** [v1.2.0](https://github.com/B00RR/MobHarness/releases/tag/v1.2.0). L’APK debug della 1.3.0 non è un aggiornamento firmato della release.
 
 L'app esegue inferenza locale con supporto **NPU (Google Tensor G5+ AOT), GPU e CPU**, **Chain of Thought (CoT) visibile in tempo reale**, **esecuzione reale di strumenti Android/Web/Coding**, apprendimento continuo (memoria + skill riutilizzabili), sandbox JavaScript/SQLite offline e protezioni avanzate per **RAM, temperatura, batteria e fluidità di sistema**.
 
@@ -38,13 +38,13 @@ Per **Home**, **Recenti** e le **sveglie con orario ed etichetta identici** puoi
 | Gruppo | Strumenti disponibili |
 | --- | --- |
 | **Memoria & Skill** | `save_memory`, `search_memory`, `delete_memory`, `search_past_sessions`, `list_skills`, `load_skill`, `save_skill` |
-| **Coding & Sandbox** | `list_workspace_files`, `read_file`, `write_file` (con snapshot di rollback), `patch_file`, `grep_workspace`, `run_javascript` (ES6+), `run_sql` (SQLite in-memory) |
+| **Coding & Sandbox** | `list_workspace_files`, `read_file_lines`, `write_workspace_file`, `patch_workspace_file`, `undo_workspace_file`, `search_code`, `run_js_sandbox`, `run_sql_sandbox` |
 | **Azioni Android** | `launch_app`, `open_url`, `open_maps`, `set_alarm`, `start_timer`, `create_calendar_event`, `draft_email`, `draft_sms`, `dial_number`, `share_text`, `open_settings` |
 | **Web & Calcolo** | `web_search` (ricerca reale su web), `fetch_webpage` (estrazione testo pulito), `calculate_expression`, `validate_json_or_regex` |
 | **Telemetria Dispositivo** | `get_device_telemetry` (batteria, °C, RAM, storage, rete), `read_clipboard`, `get_sensors`, `get_approx_location` |
 | **Automazioni** | `schedule_automation` (WorkManager: `BRIEFING`, `TELEMETRY_CHECK`, `WEB_MONITOR`, `MEMORY_DIGEST`, `WORKSPACE_AUDIT`) |
 | **Auto-Evoluzione** | `create_custom_tool`, `list_custom_tools`, `run_custom_tool`, `delete_custom_tool`, `update_soul_md`, `tune_harness_params` |
-| **Phone-Use (Accessibilità)** | `read_screen`, `tap_element`, `tap_coordinates`, `type_text`, `scroll_screen`, `system_navigate` |
+| **Phone-Use (Accessibilità)** | `read_screen_ui`, `tap_screen_text`, `tap_screen_coords`, `type_screen_text`, `scroll_screen`, `phone_global_action` |
 
 ### 4. Interfaccia Pulita su 4 Schede (Material 3)
 L'interfaccia è stata progettata per ridurre al minimo il rumore visivo tramite *progressive disclosure*:
@@ -101,7 +101,7 @@ MobHarn implementa un'architettura mobile a **3 livelli di memoria** (`ContextAn
 ### Requisiti
 - **Android minSdk**: 24 (consigliato Android 13+ su dispositivi con almeno 8 GB di RAM, es. Google Pixel con Tensor per NPU/GPU)
 - **Target / Compile SDK**: 36
-- **JDK**: 11+
+- **Ambiente usato in CI**: JDK 21 e Gradle 9.3.1.
 - Un file modello compatibile in formato **`.litertlm`** (es. Gemma 4 quantizzato per LiteRT-LM) salvato sul telefono.
 
 ### Build
@@ -119,6 +119,8 @@ gradle :app:testDebugUnitTest
 3. Tocca **Carica** sul profilo importato (opzionalmente espandi **Tune ▾** per scegliere backend NPU/GPU/CPU, Visione, Chain of Thought, temperatura e finestra di contesto).
 4. Torna nella scheda **Chat** e inizia a interagire con l'agente.
 
+**Spazio sul telefono:** il modello importato resta nei dati dell’app. LiteRT-LM usa anche una cache su disco che può occupare diversi GB. **Scarica dalla RAM** libera memoria di esecuzione, non spazio su disco. A modello chiuso, **Svuota cache** nelle impostazioni Android rimuove la cache, che può essere ricreata al caricamento successivo. **Cancella spazio di archiviazione** elimina invece anche modello importato, progetti e chat.
+
 ### Permessi Android (tutti opzionali e richiesti solo al bisogno)
 - `INTERNET` / `ACCESS_NETWORK_STATE`: usati solo per i tool `web_search` e `fetch_webpage` (l'inferenza AI è 100% locale).
 - `CAMERA`: richiesto solo quando scegli **Scatta Foto** dal menu `+` della chat.
@@ -130,6 +132,15 @@ gradle :app:testDebugUnitTest
 ---
 
 ## Cronologia Versioni (Changelog)
+
+### `1.3.0` (`versionCode 6`, non pubblicata)
+
+- **Schermo:** l’app identifica un bersaglio univoco prima di chiedere il consenso e lo ricontrolla dopo l’approvazione. Un tocco inviato non prova che sia stata raggiunta la pagina richiesta.
+- **File:** le letture hanno limiti di byte e righe. Prima di scrivere si salva lo stato precedente; il diff mostra cosa è cambiato e l’annullamento distingue un file vuoto da uno che prima non esisteva. Se il ripristino fallisce, la copia di recupero resta disponibile.
+- **Verifiche:** [97 test superati](https://github.com/B00RR/MobHarness/actions/runs/44784762505) sul commit `19062b8`. [Su emulatore](https://github.com/B00RR/MobHarness/actions/runs/44784774319) sono stati verificati l’aggiornamento dalla 1.2.0 con dati sintetici e due passaggi di navigazione seguiti dalla lettura di un interruttore, acceso e spento, senza modificarlo. Queste prove chiamano direttamente gli strumenti: non verificano le scelte di Gemma dalla chat.
+- **Limite noto:** in una prova dalla chat, Gemma ha sostituito `blu` con un’intera frase, duplicandone una parte. Ha poi riportato il testo atteso invece di quello riletto dal file. Verifica il diff o riapri il file in Studio prima di accettare una modifica importante.
+
+[Fonti e riferimenti per gli strumenti mobili](docs/fonti-harness-mobile.md)
 
 ### `v1.2.0` (`versionCode 5`)
 
