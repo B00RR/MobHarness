@@ -1,0 +1,47 @@
+name: Android upgrade rehearsal
+on: pull_request
+permissions:
+  contents: read
+concurrency:
+  group: upgrade-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  upgrade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.3.1'
+      - name: Build old and candidate APKs with one disposable debug key
+        run: |
+          set -euo pipefail
+          git worktree add --detach "$RUNNER_TEMP/old" 3036c651457db18a1a1a012cf4725f6dea191a4a
+          keytool -genkeypair -keystore debug.keystore -storepass android -keypass android -alias androiddebugkey -keyalg RSA -validity 2 -dname 'CN=Disposable upgrade QA'
+          cp debug.keystore "$RUNNER_TEMP/old/"
+          for tree in "$RUNNER_TEMP/old" "$PWD"; do
+            cp qa/upgrade/UpgradeProbe.kt "$tree/app/src/androidTest/java/com/example/UpgradeProbe.kt"
+            gradle -p "$tree" :app:assembleDebug :app:assembleDebugAndroidTest
+          done
+      - name: Allow emulator acceleration
+        run: |
+          sudo sh -c 'echo KERNEL==\"kvm\", GROUP=\"kvm\", MODE=\"0666\" > /etc/udev/rules.d/99-kvm4all.rules'
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Install 1.2.0, seed data, then update in place
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          disable-animations: true
+          script: bash qa/upgrade/rehearse.sh
