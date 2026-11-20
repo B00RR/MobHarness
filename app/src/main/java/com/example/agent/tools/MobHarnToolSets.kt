@@ -53,25 +53,37 @@ class AgentApprovalCoordinator(
 
     suspend fun requestApproval(toolName: String, category: String, description: String,
         argumentsSummary: String, rememberKey: String? = null): Boolean = queue.withLock {
-        if (rememberKey != null && unlocked() && grants?.getBoolean(rememberKey, false) == true) return@withLock true
+        val effectiveRememberKey = rememberKey.takeUnless { toolName in NON_REMEMBERABLE_SCREEN_TOOLS }
+        if (effectiveRememberKey != null && unlocked() && grants?.getBoolean(effectiveRememberKey, false) == true) return@withLock true
         val result = CompletableDeferred<Choice>()
         synchronized(this) {
             deadline = System.nanoTime() + 120_000_000_000L
             response = result
             _pendingApproval.value = PendingToolApproval(toolName = toolName, category = category,
-                description = description, argumentsSummary = argumentsSummary, rememberKey = rememberKey)
+                description = description, argumentsSummary = argumentsSummary, rememberKey = effectiveRememberKey)
         }
         try {
             when (kotlinx.coroutines.withTimeoutOrNull(120_000L) { result.await() }) {
                 Choice.ONCE -> true
                 Choice.SAVE -> {
-                    grants?.edit()?.putBoolean(rememberKey, true)?.apply()
+                    if (effectiveRememberKey != null) {
+                        grants?.edit()?.putBoolean(effectiveRememberKey, true)?.apply()
+                    }
                     true
                 }
                 else -> false
             }
         }
         finally { synchronized(this) { response = null; _pendingApproval.value = null } }
+    }
+
+    companion object {
+        private val NON_REMEMBERABLE_SCREEN_TOOLS = setOf(
+            "tap_screen_text",
+            "tap_screen_coords",
+            "type_screen_text",
+            "scroll_screen"
+        )
     }
 
     @Synchronized fun resolve(id: String, approved: Boolean, remember: Boolean = false,
@@ -829,7 +841,7 @@ class MobHarnToolkitRegistry(
             return if (raw == null || raw == JSONObject.NULL) null else raw
         }
 
-        fun str(vararg keys: String, default: String = ""): String {
+        fun str(vararg keys: String, default: String = "", allowSingleArgFallback: Boolean = true): String {
             for (k in keys) {
                 val direct = lookup(k)
                 if (direct != null) {
@@ -837,7 +849,7 @@ class MobHarnToolkitRegistry(
                     if (s.isNotEmpty() && !s.equals("null", ignoreCase = true)) return s
                 }
             }
-            if (args.size == 1 && keys.isNotEmpty()) {
+            if (allowSingleArgFallback && args.size == 1 && keys.isNotEmpty()) {
                 val rawSingle = args.values.firstOrNull()
                 if (rawSingle != null && rawSingle != JSONObject.NULL) {
                     val single = rawSingle.toString().trim()
@@ -1100,22 +1112,29 @@ class MobHarnToolkitRegistry(
                 phoneUseTools.read_screen_ui(intArg("maxNodes", "max_nodes", default = 80))
             }
             "tap_screen_text", "tap_element" -> gated("phone_use") {
-                phoneUseTools.tap_screen_text(str("targetText", "target_text", "text", "label"))
+                phoneUseTools.tap_screen_text(
+                    targetText = str("targetText", "target_text", "text", "label"),
+                    contextHint = str("contextHint", "context_hint", "context", "container", allowSingleArgFallback = false)
+                )
             }
             "tap_screen_coords", "tap_coordinates" -> gated("phone_use") {
                 phoneUseTools.tap_screen_coords(
-                    x = intArg("x", default = 0),
-                    y = intArg("y", default = 0)
+                    x = intArg("x", default = -1),
+                    y = intArg("y", default = -1)
                 )
             }
             "type_screen_text", "type_text" -> gated("phone_use") {
                 phoneUseTools.type_screen_text(
-                    fieldHint = str("fieldHint", "field_hint", "hint"),
-                    text = str("text", "value")
+                    fieldHint = str("fieldHint", "field_hint", "hint", allowSingleArgFallback = false),
+                    text = str("text", "value"),
+                    contextHint = str("contextHint", "context_hint", "context", "container", allowSingleArgFallback = false)
                 )
             }
             "scroll_screen" -> gated("phone_use") {
-                phoneUseTools.scroll_screen(str("direction", default = "down"))
+                phoneUseTools.scroll_screen(
+                    direction = str("direction", default = "down"),
+                    containerHint = str("containerHint", "container_hint", "contextHint", "context_hint", "container", allowSingleArgFallback = false)
+                )
             }
             "phone_global_action", "system_navigate" -> gated("phone_use") {
                 phoneUseTools.phone_global_action(str("action", "command", default = "home"))

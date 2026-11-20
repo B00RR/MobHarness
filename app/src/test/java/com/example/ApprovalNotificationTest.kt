@@ -59,4 +59,36 @@ class ApprovalNotificationTest {
         gate.resolve(gate.pendingApproval.value!!.id, false)
         assertFalse(result.await())
     }
+
+    @Test fun rememberedRuleDoesNotExtendToDifferentTargetOrLockedDevice() = runTest {
+        val prefs = context.getSharedPreferences("test_scope_rules", 0).apply { edit().clear().commit() }
+        var unlocked = true
+        val gate = AgentApprovalCoordinator(prefs) { unlocked }
+
+        val first = async(start = CoroutineStart.UNDISPATCHED) {
+            gate.requestApproval("set_alarm", "android_actions", "Sveglia 07:30", "07:30 (Lavoro)", "alarm_0730_lavoro")
+        }
+        gate.resolve(gate.pendingApproval.value!!.id, approved = true, remember = true)
+        assertTrue(first.await())
+
+        // Exact same key while unlocked auto-approves
+        assertTrue(gate.requestApproval("set_alarm", "android_actions", "Sveglia 07:30", "07:30 (Lavoro)", "alarm_0730_lavoro"))
+
+        // Different target/argument key MUST prompt again
+        val diffTarget = async(start = CoroutineStart.UNDISPATCHED) {
+            gate.requestApproval("set_alarm", "android_actions", "Sveglia 08:00", "08:00 (Altro)", "alarm_0800_altro")
+        }
+        assertNotNull("Different target must require fresh approval", gate.pendingApproval.value)
+        gate.resolve(gate.pendingApproval.value!!.id, approved = false)
+        assertFalse(diffTarget.await())
+
+        // Same saved key while device is locked MUST NOT auto-approve
+        unlocked = false
+        val whileLocked = async(start = CoroutineStart.UNDISPATCHED) {
+            gate.requestApproval("set_alarm", "android_actions", "Sveglia 07:30", "07:30 (Lavoro)", "alarm_0730_lavoro")
+        }
+        assertNotNull("Locked device must not silently auto-approve remembered grant", gate.pendingApproval.value)
+        gate.resolve(gate.pendingApproval.value!!.id, approved = false)
+        assertFalse(whileLocked.await())
+    }
 }

@@ -35,4 +35,19 @@ class ApprovalGateTest {
         try { assertEquals("a", gate.pendingApproval.value?.toolName) }
         finally { first.cancel(); second.cancel() }
     }
+
+    @Test fun screenTargetActionsCannotBeSavedAsPermanentRememberedPermission() = runTest {
+        val gate = AgentApprovalCoordinator()
+        for (tool in listOf("tap_screen_text", "tap_screen_coords", "type_screen_text", "scroll_screen")) {
+            val req = async(start = CoroutineStart.UNDISPATCHED) {
+                gate.requestApproval(tool, "phone_use", "Azione", "arg", rememberKey = "forged_key_$tool")
+            }
+            val pending = gate.pendingApproval.value!!
+            assertEquals("Screen target $tool must strip rememberKey", null, pending.rememberKey)
+            gate.resolve(pending.id, approved = true, remember = true)
+            assertEquals(false, req.isCompleted)
+            gate.resolve(pending.id, approved = false)
+            assertEquals(false, req.await())
+        }
+    }
 }
