@@ -89,6 +89,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberDrawerState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -251,6 +253,19 @@ fun ChatScreen(
     ) { granted ->
         if (granted) launchCameraCapture()
         else onShowMessage("Permesso fotocamera negato.")
+    }
+
+    uiState.lesson?.takeIf { it.session == uiState.activeSessionId && !uiState.isGenerating && ToolGroup.MEMORY.id in prefs.enabledToolGroups }?.let { review ->
+        val lesson = review.proposed
+        AlertDialog(onDismissRequest = { viewModel.resolveLesson(review, false) },
+            title = { Text(if (review.previous == null) "Ricordare questa procedura?" else "Aggiornare la procedura?") },
+            text = { Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(review.source)
+                review.previous?.let { Text("Prima: ${it.title} — ${it.description}\n${it.instructionsMd}") }
+                Text("Proposta: ${lesson.title} — ${lesson.description}\n${lesson.instructionsMd}")
+                Text("Scarta se contiene dati personali. Salvare non autorizza azioni sul telefono.")
+            } }, confirmButton = { Button(onClick = { viewModel.resolveLesson(review, true) }) { Text("Salva") } },
+            dismissButton = { OutlinedButton(onClick = { viewModel.resolveLesson(review, false) }) { Text("Scarta") } })
     }
 
     // Tool Approval Gate Dialog

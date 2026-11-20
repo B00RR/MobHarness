@@ -51,7 +51,7 @@ class MobHarnRepository(
 
         val existingSkills = db.skillDao().getEnabledSkills()
         if (existingSkills.isEmpty()) {
-            DEFAULT_SKILLS.forEach { db.skillDao().upsertSkill(it) }
+            DEFAULT_SKILLS.forEach { db.skillDao().insertNewSkill(it) }
         }
 
         val existingCustomTools = db.customToolDao().getEnabledCustomTools()
@@ -211,9 +211,20 @@ class MobHarnRepository(
 
     suspend fun loadSkill(slug: String): AgentSkillEntity? {
         val clean = slug.trim().removePrefix("/").lowercase()
-        val skill = db.skillDao().getSkillBySlug(clean) ?: return null
+        val skill = db.skillDao().getSkillBySlug(clean)?.takeIf { it.enabled } ?: return null
         db.skillDao().incrementUsage(clean)
         return skill
+    }
+
+    suspend fun inspectSkill(slug: String) = db.skillDao().getSkillBySlug(slug)
+
+    suspend fun acceptLesson(lesson: AgentSkillEntity, previous: AgentSkillEntity?): Boolean {
+        if (com.example.data.prefs.ToolGroup.MEMORY.id !in preferencesFlow.first().enabledToolGroups) return false
+        val dao = db.skillDao()
+        val ok = if (previous == null) dao.insertNewSkill(lesson) != -1L else previous.enabled && previous.slug == lesson.slug &&
+            dao.reviseIfUnchanged(previous.id, previous.updatedAt, lesson.title, lesson.description, lesson.instructionsMd, System.currentTimeMillis()) == 1
+        if (ok) vault.syncSkillsToDisk(dao.getEnabledSkills())
+        return ok
     }
 
     suspend fun upsertSkill(
@@ -242,7 +253,11 @@ class MobHarnRepository(
 
     suspend fun setSkillEnabled(id: Long, enabled: Boolean) = db.skillDao().setSkillEnabled(id, enabled)
 
-    suspend fun deleteSkill(id: Long) = db.skillDao().deleteSkill(id)
+    suspend fun deleteSkill(id: Long) {
+        val skill = db.skillDao().observeSkills().first().firstOrNull { it.id == id } ?: return
+        db.skillDao().deleteSkill(id)
+        vault.removeSkillCopy(skill.slug)
+    }
 
     // --- Workspace Snapshots ---
     fun observeSnapshots(projectName: String): Flow<List<WorkspaceSnapshotEntity>> =

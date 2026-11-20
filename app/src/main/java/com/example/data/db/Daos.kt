@@ -127,6 +127,12 @@ interface SkillDao {
     @Query("SELECT * FROM agent_skills WHERE slug = :slug LIMIT 1")
     suspend fun getSkillBySlug(slug: String): AgentSkillEntity?
 
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertNewSkill(skill: AgentSkillEntity): Long
+
+    @Query("UPDATE agent_skills SET title=:title, description=:description, instructionsMd=:body, updatedAt=:now WHERE id=:id AND enabled=1 AND updatedAt=:expected")
+    suspend fun reviseIfUnchanged(id: Long, expected: Long, title: String, description: String, body: String, now: Long): Int
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertSkill(skill: AgentSkillEntity): Long
 
