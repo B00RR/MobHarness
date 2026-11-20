@@ -33,6 +33,14 @@ class VerifiedToolsTest {
         assertFalse(tester.matchesExample("[1,2]", "[1,2]"))
     }
 
+    @Test fun aFailedOrDeniedTapNeverClaimsSuccess() {
+        fun label(status: String) = com.example.ui.components.traceLabel(
+            com.example.agent.tools.ToolCallTrace(toolName = "tap_screen_text", category = "phone_use", argumentsSummary = "", status = status))
+        assertEquals("Azione non riuscita", label("error"))
+        assertEquals("Azione non autorizzata", label("denied"))
+        assertEquals("Azione inviata", label("success"))
+    }
+
     @Test fun visibleTargetMustStillMatchPackageAndLabel() {
         val svc = org.robolectric.Robolectric.buildService(com.example.agent.phoneuse.MobHarnAccessibilityService::class.java).get()
         val node = android.view.accessibility.AccessibilityNodeInfo.obtain().apply {
