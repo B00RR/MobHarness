@@ -59,7 +59,7 @@ sealed interface WebResult {
         override val text: String get() = content
     }
 
-    sealed class Failure(val error: String, val cause: Throwable? = null) : WebResult, Exception(error, cause) {
+    sealed class Failure(val error: String, cause: Throwable? = null) : WebResult, Exception(error, cause) {
         override val text: String get() = error
 
         class HttpError(val code: Int, val url: String) :
