@@ -173,6 +173,8 @@ class PhoneUseToolSet(
     private val monitor: ToolExecutionMonitor
 ) : ToolSet {
 
+    private val accessRequired = "Servizio Accessibilità non connesso. Nella chat scegli ⋮ → Apri Accessibilità per autorizzare MobHarn."
+
     private fun requireService(): MobHarnAccessibilityService? = MobHarnAccessibilityService.instance
 
     @Tool(description = "Legge l'albero UI reale dello schermo attualmente visibile sul Pixel (app aperta, testi, bottoni cliccabili, campi input e coordinate)")
@@ -184,7 +186,7 @@ class PhoneUseToolSet(
         argsSummary = "maxNodes=$maxNodes"
     ) {
         val svc = requireService()
-            ?: return@executeTracked "Servizio Accessibilità MobHarn non attivo. L'utente deve attivarlo da Studio → Strumenti → Apri Accessibilità."
+            ?: return@executeTracked accessRequired
         svc.captureScreenTree(maxNodes.coerceIn(10, 150))
     }
 
@@ -199,7 +201,7 @@ class PhoneUseToolSet(
         approvalDescription = "Toccare sullo schermo l'elemento '$targetText'?"
     ) {
         val svc = requireService()
-            ?: return@executeTracked "Servizio Accessibilità non attivo."
+            ?: return@executeTracked accessRequired
         svc.tapByText(targetText)
     }
 
@@ -215,7 +217,7 @@ class PhoneUseToolSet(
         approvalDescription = "Toccare lo schermo alle coordinate ($x, $y)?"
     ) {
         val svc = requireService()
-            ?: return@executeTracked "Servizio Accessibilità non attivo."
+            ?: return@executeTracked accessRequired
         svc.tapCoordinates(x.toFloat(), y.toFloat())
     }
 
@@ -233,7 +235,7 @@ class PhoneUseToolSet(
             approvalDescription = "Scrivere '${text.take(60)}' nel $targetField sullo schermo?"
         ) {
             val svc = requireService()
-                ?: return@executeTracked "Servizio Accessibilità non attivo."
+                ?: return@executeTracked accessRequired
             svc.typeText(fieldHint, text)
         }
     }
@@ -249,7 +251,7 @@ class PhoneUseToolSet(
         approvalDescription = "Scorrere lo schermo verso '$direction'?"
     ) {
         val svc = requireService()
-            ?: return@executeTracked "Servizio Accessibilità non attivo."
+            ?: return@executeTracked accessRequired
         svc.scrollScreen(direction)
     }
 
@@ -264,7 +266,7 @@ class PhoneUseToolSet(
         approvalDescription = "Eseguire l'azione di sistema '$action' sul Pixel?"
     ) {
         val svc = requireService()
-            ?: return@executeTracked "Servizio Accessibilità non attivo."
+            ?: return@executeTracked accessRequired
         svc.performSystemNavigation(action)
     }
 }
