@@ -38,7 +38,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
+data class LessonReview(val session: Long, val proposed: AgentSkillEntity, val previous: AgentSkillEntity?, val source: String)
+
 data class ChatUiState(
+    val lesson: LessonReview? = null,
     val activeSessionId: Long = -1L,
     val isGenerating: Boolean = false,
     val streamingVisibleText: String = "",
@@ -147,6 +150,7 @@ class ChatViewModel(
         _uiState.update {
             it.copy(
                 activeSessionId = sessionId,
+                lesson = null,
                 streamingVisibleText = "",
                 streamingThinkingText = "",
                 liveToolTraces = emptyList(),
@@ -173,6 +177,7 @@ class ChatViewModel(
             _uiState.update {
                 it.copy(
                     activeSessionId = id,
+                    lesson = null,
                     streamingVisibleText = "",
                     streamingThinkingText = "",
                     liveToolTraces = emptyList(),
@@ -457,6 +462,9 @@ class ChatViewModel(
             }
 
             val traces = mutableListOf<ToolCallTrace>()
+            val requestedLesson = java.util.concurrent.atomic.AtomicReference<AgentSkillEntity?>(null)
+            val explicitlyTeaching = Regex("""^(?:correzione|impara questa procedura|crea una skill|salva come skill|salva questa skill|impara questo flusso|nuova skill)\b""", RegexOption.IGNORE_CASE).containsMatchIn(prompt.trim())
+            container.toolMonitor.onSkillProposal = { draft -> explicitlyTeaching && imagePath == null && requestedLesson.compareAndSet(null, draft) }
             container.toolMonitor.activeSessionId = sessionId
             container.toolMonitor.activeProjectName = currentPrefs.activeProjectName
             container.toolMonitor.requireApprovalForExternal = currentPrefs.requireApprovalForExternalActions
@@ -471,6 +479,7 @@ class ChatViewModel(
             val startedAtMs = System.currentTimeMillis()
             _uiState.update {
                 it.copy(
+                    lesson = null,
                     isGenerating = true,
                     streamingVisibleText = "",
                     streamingThinkingText = "",
@@ -614,14 +623,19 @@ class ChatViewModel(
                     }
                 }
 
-                // Continuous-learning safety net: if the user explicitly asked to remember/note a fact
-                // or learn/create a skill and the model forgot to invoke save_memory/save_skill, capture it!
-                captureExplicitLearningIfMissed(
-                    sessionId = sessionId,
-                    userPrompt = prompt,
-                    assistantReply = finalText,
-                    traces = traces
-                )
+                if (ToolGroup.MEMORY.id in currentPrefs.enabledToolGroups) {
+                    val snapshot = synchronized(traces) { traces.toList() }
+                    if (!explicitlyTeaching) captureExplicitLearningIfMissed(sessionId, prompt, traces)
+                    val observed = com.example.agent.LocalLearning.suggest(prompt, snapshot)
+                    val draft = observed ?: requestedLesson.get()?.takeIf { snapshot.all { t -> t.status == "success" } }
+                    if (draft != null) {
+                        val old = repo.inspectSkill(draft.slug)
+                        if (old?.enabled != false && !(old?.instructionsMd == draft.instructionsMd && old.title == draft.title && old.description == draft.description)) {
+                            val source = if (observed != null && !explicitlyTeaching) "Passaggio verificato sul telefono" else "Proposta su tua richiesta, non verificata sul telefono"
+                            _uiState.update { if (it.activeSessionId == sessionId) it.copy(lesson = LessonReview(sessionId, draft, old, source)) else it }
+                        }
+                    }
+                }
 
                 repo.addMessage(
                     ChatMessageEntity(
@@ -666,6 +680,7 @@ class ChatViewModel(
                     )
                 )
             } finally {
+                container.toolMonitor.onSkillProposal = null
                 container.toolMonitor.onLiveTraceUpdate = null
                 _uiState.update {
                     it.copy(
@@ -706,7 +721,6 @@ class ChatViewModel(
     private suspend fun captureExplicitLearningIfMissed(
         sessionId: Long,
         userPrompt: String,
-        assistantReply: String,
         traces: MutableList<ToolCallTrace>
     ) {
         val lower = userPrompt.lowercase().trim()
@@ -715,10 +729,6 @@ class ChatViewModel(
         val alreadySavedMemory = synchronized(traces) {
             traces.any { it.toolName == "save_memory" && it.status == "success" }
         }
-        val alreadySavedSkill = synchronized(traces) {
-            traces.any { it.toolName == "save_skill" && it.status == "success" }
-        }
-
         // 1. Explicit memory / note / personal fact capture
         if (!alreadySavedMemory) {
             val explicitMemoryPrefixes = listOf(
@@ -779,37 +789,17 @@ class ChatViewModel(
             }
         }
 
-        // 2. Explicit skill creation capture
-        if (!alreadySavedSkill && assistantReply.length >= 60) {
-            val skillTrigger = listOf(
-                "crea una skill", "salva come skill", "salva questa skill",
-                "impara questa procedura", "impara questo flusso", "nuova skill"
-            ).any { lower.contains(it) }
-            if (skillTrigger) {
-                val slug = lower
-                    .replace(Regex("(crea una skill|salva come skill|salva questa skill|impara questa procedura|impara questo flusso|nuova skill)"), "")
-                    .replace(Regex("[^a-z0-9]+"), "_")
-                    .trim('_')
-                    .take(28)
-                    .ifBlank { "skill_${System.currentTimeMillis() % 10000}" }
-                val title = userPrompt.take(56).trim()
-                repo.upsertSkill(
-                    slug = slug,
-                    title = title,
-                    description = "Skill appresa dalla chat: ${userPrompt.take(90)}",
-                    instructionsMd = assistantReply.take(1500)
-                )
-                val trace = ToolCallTrace(
-                    toolName = "save_skill",
-                    category = ToolGroup.MEMORY.id,
-                    argumentsSummary = "slug=$slug",
-                    resultSummary = "Skill '/$slug' salvata automaticamente nella libreria locale.",
-                    durationMs = 5,
-                    status = "success"
-                )
-                synchronized(traces) { traces.add(trace) }
-                repo.logToolExecution(sessionId, "save_skill", ToolGroup.MEMORY.id, trace.argumentsSummary, trace.resultSummary, 5, true)
-            }
+    }
+
+    fun resolveLesson(review: LessonReview, save: Boolean) {
+        val state = _uiState.value
+        if (state.lesson !== review || state.activeSessionId != review.session) return
+        _uiState.update { it.copy(lesson = null) }
+        if (save) viewModelScope.launch {
+            val message = try {
+                if (repo.acceptLesson(review.proposed, review.previous)) "Procedura salvata." else "Memoria disattivata o procedura cambiata: nessuna modifica."
+            } catch (e: Exception) { "Verifica la procedura in Memoria: sincronizzazione non completata." }
+            _events.emit(message)
         }
     }
 }

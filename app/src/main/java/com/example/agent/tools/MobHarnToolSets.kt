@@ -94,6 +94,7 @@ class ToolExecutionMonitor(
     @Volatile var requireApprovalForExternal: Boolean = true
     @Volatile var onLiveTraceUpdate: ((ToolCallTrace) -> Unit)? = null
 
+    @Volatile var onSkillProposal: ((com.example.data.db.AgentSkillEntity) -> Boolean)? = null
     private val turnLock = Any()
     private val turnCallSignatures = mutableListOf<Pair<String, String>>()
     private val turnToolOutputs = mutableListOf<Pair<String, String>>()
@@ -344,8 +345,11 @@ class MemoryAndSkillsToolSet(
             if (cleanInstructions.isBlank()) {
                 return@executeTracked "Errore save_skill: le istruzioni Markdown della skill non possono essere vuote."
             }
-            repository.upsertSkill(cleanSlug, cleanTitle, cleanDesc, cleanInstructions)
-            "Skill '/$cleanSlug' salvata e sincronizzata nel vault."
+            if (cleanSlug.length > 64 || cleanTitle.length > 80 || cleanDesc.length > 160 || cleanInstructions.length > 600)
+                return@executeTracked "Proposta troppo lunga. Riducila a una regola breve, senza dati personali."
+            val proposed = com.example.data.db.AgentSkillEntity(slug = cleanSlug, title = cleanTitle, description = cleanDesc, instructionsMd = cleanInstructions)
+            if (monitor.onSkillProposal?.invoke(proposed) == true) "Bozza in attesa di revisione; non ancora salvata."
+            else "Nessuna scrittura. Per una correzione indica: Correzione: tema | regola."
         }
     }
 

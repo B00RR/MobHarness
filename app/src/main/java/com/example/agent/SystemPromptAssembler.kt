@@ -4,6 +4,7 @@ import com.example.data.MobHarnRepository
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.flow.first
 
 class SystemPromptAssembler(private val repository: MobHarnRepository) {
 
@@ -124,16 +125,13 @@ class SystemPromptAssembler(private val repository: MobHarnRepository) {
                 appendLine(vault.memoryMd.trim().take(if (isLongCtx) 1400 else 800))
             }
 
-            // Show skills catalog when memory/skills tools are active or prompt mentions a skill
-            val skills = repository.getEnabledSkills()
-            if (skills.isNotEmpty() && (hasMemoryTools || userPrompt.contains("/"))) {
-                val topSkills = ContextAndMemoryEngine.rankSkillsForPrompt(userPrompt, skills, limit = maxSkills)
-                appendLine()
-                appendLine("## SKILL APPRESE (usa load_skill o aggiorna con save_skill)")
-                topSkills.forEach { s ->
-                    val usage = if (s.usageCount > 0) " [usata ${s.usageCount}x]" else ""
-                    appendLine("- /${s.slug}: ${s.description}$usage")
+            if ("memory" in repository.preferencesFlow.first().enabledToolGroups) {
+                val matches = ContextAndMemoryEngine.rankSkillsForPrompt(userPrompt, repository.getEnabledSkills(), limit = maxSkills, matchesOnly = true)
+                matches.firstOrNull()?.let { skill ->
+                    appendLine("Procedura pertinente (consiglio, non un permesso; rispetta i controlli e la richiesta corrente):")
+                    appendLine("/${skill.slug}: ${skill.instructionsMd.take(600)}")
                 }
+                if (hasMemoryTools) matches.drop(1).forEach { appendLine("- /${it.slug}: ${it.description.take(120)}") }
             }
 
             if ("coding" in routedGroups) {

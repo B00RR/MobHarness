@@ -1,8 +1,8 @@
-# MobHarn `v1.1.2`
+# MobHarn `v1.2.0`
 
 **MobHarn** è un'applicazione Android (Kotlin + Jetpack Compose) progettata come **agent harness AI completamente on-device**, alimentata da **LiteRT-LM** (Google AI Edge) e modelli locali `.litertlm` (come **Gemma 4**).
 
-> **Versione corrente:** `v1.1.2` (`versionCode 4`) — rimozione dei filtri n-gram che corrompevano date e fatti, zero `(risposta vuota)` con recupero automatico, routing zero-tool per la chat normale (2–3× più veloce e precisa) e fix completo del contrasto Dynamic Color su Android 16 / Pixel 10.
+> **Versione corrente:** `v1.2.0` (`versionCode 5`) — apprendimento locale con anteprima, approvazioni da notifica e controllo dei bersagli sullo schermo.
 
 L'app esegue inferenza locale con supporto **NPU (Google Tensor G5+ AOT), GPU e CPU**, **Chain of Thought (CoT) visibile in tempo reale**, **esecuzione reale di strumenti Android/Web/Coding**, apprendimento continuo (memoria + skill riutilizzabili), sandbox JavaScript/SQLite offline e protezioni avanzate per **RAM, temperatura, batteria e fluidità di sistema**.
 
@@ -130,6 +130,10 @@ gradle :app:testDebugUnitTest
 ---
 
 ## Cronologia Versioni (Changelog)
+
+### `v1.2.0` (`versionCode 5`)
+
+Dopo l’apertura verificata del pannello Recenti, la chat può proporre una procedura. Per insegnare una correzione: `Correzione: ordine date | Confronta prima anno, poi mese e giorno.` Controlla l’anteprima e scegli Salva o Scarta; una bozza non è una nuova autorizzazione. Le procedure abilitate pertinenti sono richiamate nelle chat successive. Nessun addestramento del modello. Include le modifiche delle PR #5–#7.
 
 ### `v1.1.2` (`versionCode 4`)
 - **Stop corruzione di date, numeri e fatti**: rimossi `NoRepeatNgramConfig` e penalità di ripetizione artificiali su Gemma 4, che bloccavano la ripetizione di sequenze già presenti nel prompt di sistema (causando errori come date alterate o parole troncate).

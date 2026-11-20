@@ -192,6 +192,11 @@ class MarkdownVaultManager(context: Context) {
         }
     }
 
+    suspend fun removeSkillCopy(slug: String) = withContext(Dispatchers.IO) {
+        val file = File(skillsDir, slug.replace(Regex("[^a-zA-Z0-9_-]"), "_") + ".md")
+        check(!file.exists() || file.delete()) { "Copia Markdown non rimossa" }
+    }
+
     suspend fun syncSkillsToDisk(skills: List<AgentSkillEntity>) = withContext(Dispatchers.IO) {
         skills.forEach { skill ->
             val safeSlug = skill.slug.replace(Regex("[^a-zA-Z0-9_-]"), "_")

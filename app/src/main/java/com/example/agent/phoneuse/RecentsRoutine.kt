@@ -22,7 +22,7 @@ internal class RecentsRoutine(private val pause: suspend (Long) -> Unit = { dela
                 if (visible()) {
                     // Probe slightly earlier next time; never increase the overall observation budget indefinitely.
                     firstProbeMs = (elapsed - 60L).coerceIn(100L, 500L)
-                    return "Pannello Recenti visibile e verificato. Non indica il numero totale di app attive."
+                    return com.example.agent.LocalLearning.verifiedRecents
                 }
             }
             return "Android ha accettato la richiesta, ma il pannello Recenti non è verificabile."
