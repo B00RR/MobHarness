@@ -266,8 +266,8 @@ class ChatViewModel(
         _incomingSharedPrompt.value = null
     }
 
-    fun resolveToolApproval(approved: Boolean) {
-        container.approvalCoordinator.resolve(approved)
+    fun resolveToolApproval(id: String, approved: Boolean, remember: Boolean = false) {
+        container.approvalCoordinator.resolve(id, approved, remember)
     }
 
     fun dismissQuickSandboxBanner() {
@@ -683,6 +683,7 @@ class ChatViewModel(
     }
 
     fun stopGeneration() {
+        pendingApproval.value?.let { container.approvalCoordinator.resolve(it.id, false) }
         runtime.cancelGeneration()
         generationJob?.cancel()
         generationJob = null

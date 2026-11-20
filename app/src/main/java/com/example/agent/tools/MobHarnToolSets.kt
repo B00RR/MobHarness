@@ -15,6 +15,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
@@ -35,40 +36,53 @@ data class PendingToolApproval(
     val toolName: String,
     val category: String,
     val description: String,
-    val argumentsSummary: String
+    val argumentsSummary: String,
+    val rememberKey: String? = null
 )
 
-class AgentApprovalCoordinator {
+class AgentApprovalCoordinator(
+    private val grants: android.content.SharedPreferences? = null,
+    private val unlocked: () -> Boolean = { true }
+) {
     private val _pendingApproval = MutableStateFlow<PendingToolApproval?>(null)
-    val pendingApproval: StateFlow<PendingToolApproval?> = _pendingApproval.asStateFlow()
+    val pendingApproval = _pendingApproval.asStateFlow()
+    private val queue = kotlinx.coroutines.sync.Mutex()
+    private enum class Choice { ONCE, SAVE, DENY }
+    private var response: CompletableDeferred<Choice>? = null
+    private var deadline = 0L
 
-    private var currentDeferred: CompletableDeferred<Boolean>? = null
-
-    suspend fun requestApproval(
-        toolName: String,
-        category: String,
-        description: String,
-        argumentsSummary: String
-    ): Boolean {
-        val deferred = CompletableDeferred<Boolean>()
-        currentDeferred = deferred
-        _pendingApproval.value = PendingToolApproval(
-            toolName = toolName,
-            category = category,
-            description = description,
-            argumentsSummary = argumentsSummary
-        )
-        return try {
-            deferred.await()
-        } finally {
-            _pendingApproval.value = null
-            currentDeferred = null
+    suspend fun requestApproval(toolName: String, category: String, description: String,
+        argumentsSummary: String, rememberKey: String? = null): Boolean = queue.withLock {
+        if (rememberKey != null && unlocked() && grants?.getBoolean(rememberKey, false) == true) return@withLock true
+        val result = CompletableDeferred<Choice>()
+        synchronized(this) {
+            deadline = System.nanoTime() + 120_000_000_000L
+            response = result
+            _pendingApproval.value = PendingToolApproval(toolName = toolName, category = category,
+                description = description, argumentsSummary = argumentsSummary, rememberKey = rememberKey)
         }
+        try {
+            when (kotlinx.coroutines.withTimeoutOrNull(120_000L) { result.await() }) {
+                Choice.ONCE -> true
+                Choice.SAVE -> {
+                    grants?.edit()?.putBoolean(rememberKey, true)?.apply()
+                    true
+                }
+                else -> false
+            }
+        }
+        finally { synchronized(this) { response = null; _pendingApproval.value = null } }
     }
 
-    fun resolve(approved: Boolean) {
-        currentDeferred?.complete(approved)
+    @Synchronized fun resolve(id: String, approved: Boolean, remember: Boolean = false) {
+        val request = _pendingApproval.value ?: return
+        val answer = response ?: return
+        if (request.id != id || System.nanoTime() >= deadline || answer.isCompleted || (approved && !unlocked())) return
+        if (remember && (!approved || request.rememberKey == null)) return
+        answer.complete(if (remember) Choice.SAVE else if (approved) Choice.ONCE else Choice.DENY)
     }
+
+    @Synchronized fun clearRemembered() { grants?.edit()?.clear()?.apply() }
 }
 
 class ToolExecutionMonitor(
@@ -103,6 +117,7 @@ class ToolExecutionMonitor(
         argsSummary: String,
         isExternalOrMutating: Boolean = false,
         approvalDescription: String = "",
+        exactCommand: List<String>? = null,
         block: suspend () -> String
     ): String = runBlocking {
         val normSig = toolName.lowercase() to argsSummary.trim().lowercase().replace(Regex("\\s+"), " ")
@@ -140,7 +155,11 @@ class ToolExecutionMonitor(
                 toolName = toolName,
                 category = category,
                 description = approvalDescription.ifBlank { "Eseguire lo strumento $toolName?" },
-                argumentsSummary = argsSummary
+                argumentsSummary = argsSummary,
+                rememberKey = exactCommand?.let {
+                    val encoded = JSONArray(listOf("v1", category, toolName) + it).toString().toByteArray(Charsets.UTF_8)
+                    java.security.MessageDigest.getInstance("SHA-256").digest(encoded).joinToString("") { byte -> "%02x".format(byte) }
+                }
             )
             if (!granted) {
                 val msg = "Azione rifiutata dall'utente."
@@ -475,6 +494,7 @@ class AndroidActionsToolSet(
     ): String = monitor.executeTracked(
         toolName = "set_alarm",
         category = ToolGroup.ANDROID_ACTIONS.id,
+        exactCommand = if (hour in 0..23 && minute in 0..59 && message.length <= 48 && message.none { it.isISOControl() }) listOf(hour.toString(), minute.toString(), message) else null,
         argsSummary = "%02d:%02d (%s)".format(hour, minute, message),
         isExternalOrMutating = true,
         approvalDescription = "Impostare una sveglia alle %02d:%02d con etichetta '$message'?".format(hour, minute)

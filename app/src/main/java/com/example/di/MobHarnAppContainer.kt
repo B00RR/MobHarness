@@ -41,7 +41,13 @@ class MobHarnAppContainer private constructor(context: Context) {
     val systemActions: AndroidSystemActions by lazy { AndroidSystemActions(appContext) }
     val codeSandbox: CodeSandboxRunner by lazy { CodeSandboxRunner(appContext) }
     val automationScheduler: AutomationScheduler by lazy { AutomationScheduler(appContext) }
-    val approvalCoordinator: AgentApprovalCoordinator by lazy { AgentApprovalCoordinator() }
+    val approvalCoordinator: AgentApprovalCoordinator by lazy {
+        AgentApprovalCoordinator(appContext.getSharedPreferences("approval_rules", Context.MODE_PRIVATE)) {
+            appContext.getSystemService(android.app.KeyguardManager::class.java)?.isDeviceLocked == false
+        }
+    }
+
+    val approvalNotifications by lazy { com.example.agent.tools.ApprovalNotifications(appContext, approvalCoordinator) }
 
     val toolMonitor: ToolExecutionMonitor by lazy {
         ToolExecutionMonitor(

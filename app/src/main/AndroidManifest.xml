@@ -88,6 +88,8 @@
                 android:resource="@xml/mobharn_accessibility_config" />
         </service>
 
+        <receiver android:name=".agent.tools.ApprovalActionReceiver" android:exported="false" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
