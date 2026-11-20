@@ -210,8 +210,7 @@ class PhoneUseToolSet(
         category = ToolGroup.PHONE_USE.id,
         argsSummary = "maxNodes=$maxNodes"
     ) {
-        val svc = requireService()
-            ?: return@executeTracked accessRequired
+        val svc = checkNotNull(requireService()) { accessRequired }
         svc.captureScreenTree(maxNodes.coerceIn(10, 150))
     }
 
@@ -243,7 +242,7 @@ class PhoneUseToolSet(
             toolName = "tap_screen_coords",
             category = ToolGroup.PHONE_USE.id,
             argsSummary = "tap @($x, $y)",
-            isExternalOrMutating = true,
+            isExternalOrMutating = target != null, // A missing target only reports an error; never request a blind tap.
             approvalDescription = "Toccare lo schermo alle coordinate ($x, $y)?"
         ) {
             checkNotNull(source) { accessRequired }.applyTarget(target)
