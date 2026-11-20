@@ -444,8 +444,8 @@ class ReversibleWorkspaceWritesTest {
 
             studioVm.createNewFile("studio_file.js")
             waitUntil { studioVm.uiState.value.selectedFile == "studio_file.js" && studioVm.uiState.value.loadedFileSha256 != null }
-            val studioFile = File(context.filesDir, "workspace/$appProject/studio_file.js")
-            assertTrue(studioFile.exists())
+            val studioFile = container.workspaceManager.inspectFileState(appProject, "studio_file.js").file
+            assertTrue("Missing $studioFile, project=${studioVm.uiState.value.activeProject}, files=${container.workspaceManager.listFiles(appProject)}", studioFile.isFile)
             assertTrue(studioVm.uiState.value.lastDiffPreview.orEmpty().contains("+++ b/studio_file.js"))
 
             // Concurrent external edit while open in Studio must block Studio save from clobbering

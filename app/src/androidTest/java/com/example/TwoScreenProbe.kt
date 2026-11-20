@@ -42,7 +42,7 @@ class TwoScreenProbe {
         for (on in listOf(false, true)) {
             app.toolMonitor.beginTurn()
             app.toolMonitor.requireApprovalForExternal = true
-            val command = "am start -W --activity-clear-task --activity-new-task -n $pkg/com.example.ScreenFixture --ez enabled $on"
+            val command = "am start -W -f 0x10008000 -n $pkg/com.example.ScreenFixture --ez enabled $on"
             ParcelFileDescriptor.AutoCloseInputStream(automation.executeShellCommand(command)).bufferedReader().use { val out = it.readText(); check(out.contains("Status: ok")) { out } }
             assertTrue(observed("Archivio").contains("Archivio"))
             tapOnce("Archivio")
