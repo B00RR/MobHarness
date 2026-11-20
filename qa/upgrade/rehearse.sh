@@ -12,3 +12,8 @@ probe() {
 }
 probe "$RUNNER_TEMP/old" seed
 probe "$PWD" check
+pkg=com.aistudio.mobharn.kx7vqp
+adb -s "$serial" shell settings put secure enabled_accessibility_services "$pkg/com.example.agent.phoneuse.MobHarnAccessibilityService"
+adb -s "$serial" shell settings put secure accessibility_enabled 1
+timeout 100 adb -s "$serial" shell am instrument -w -e class com.example.TwoScreenProbe "$pkg.test/androidx.test.runner.AndroidJUnitRunner" | tee "$RUNNER_TEMP/screen.log"
+grep -Fq 'OK (1 test)' "$RUNNER_TEMP/screen.log"
