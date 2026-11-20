@@ -515,10 +515,7 @@ class LiteRtRuntimeManager(
 
             // Sticky Session Tool Groups: reuse warm KV-cache when active tools already cover this turn
             // and avoid dragging heavy multi-group tool schemas onto plain zero-tool chat turns.
-            val samePhoneAccess = (ToolGroup.PHONE_USE.id in activeToolGroupsSignature) == (ToolGroup.PHONE_USE.id in enabledToolGroups)
-            val warmToolsSatisfyTurn = samePhoneAccess && activeSessionConversationId == sessionId &&
-                enabledToolGroups.all { it in activeToolGroupsSignature } &&
-                (enabledToolGroups.isNotEmpty() || activeToolGroupsSignature.size <= 1)
+            val warmToolsSatisfyTurn = activeToolGroupsSignature == enabledToolGroups
 
             val needsNewConversation = existingConv == null ||
                 forceConversationReset ||
@@ -539,13 +536,7 @@ class LiteRtRuntimeManager(
 
             if (needsNewConversation) {
                 runCatching { existingConv?.close() }
-                // Cap sticky union to 2 groups so tool schemas stay compact and KV-cache RAM remains lean
-                val groupsToBind = if (samePhoneAccess && activeSessionConversationId == sessionId && !forceConversationReset && !kvNearFull && enabledToolGroups.isNotEmpty()) {
-                    val union = activeToolGroupsSignature + enabledToolGroups
-                    if (union.size <= 2) union else enabledToolGroups
-                } else {
-                    enabledToolGroups
-                }
+                val groupsToBind = enabledToolGroups
                 val tools = toolkitRegistry.buildEnabledToolProviders(groupsToBind)
 
                 // Strictly alternating user -> model pairs ending with model, using head+tail compression

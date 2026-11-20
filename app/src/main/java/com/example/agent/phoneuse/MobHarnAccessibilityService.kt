@@ -1,10 +1,8 @@
 package com.example.agent.phoneuse
 
 import android.accessibilityservice.AccessibilityService
-import android.accessibilityservice.GestureDescription
 import android.content.Context
 import android.content.Intent
-import android.graphics.Path
 import android.graphics.Rect
 import android.net.Uri
 import android.os.Build
@@ -12,7 +10,6 @@ import android.os.Bundle
 import android.provider.Settings
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -43,9 +40,20 @@ class MobHarnAccessibilityService : AccessibilityService() {
         _isConnected.value = false
     }
 
+    internal data class WindowKey(val pkg: String, val id: Int)
+    @Volatile private var observed: WindowKey? = null
+    private fun AccessibilityNodeInfo.windowKey() = WindowKey(packageName?.toString().orEmpty(), windowId)
+    private fun activeApp(): AccessibilityNodeInfo? {
+        if (instance !== this || getSystemService(android.app.KeyguardManager::class.java)?.isDeviceLocked != false) return null
+        val root = rootInActiveWindow ?: return null
+        val pkg = root.packageName?.toString() ?: return null
+        return root.takeIf { pkg != packageName && pkg !in setOf("com.android.systemui", "com.android.permissioncontroller", "com.google.android.permissioncontroller") && root.window?.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION }
+    }
+
     fun captureScreenTree(maxNodes: Int = 80): String {
-        val root = rootInActiveWindow
-            ?: return "Finestra attiva non disponibile (schermo spento o protetto)."
+        observed = null
+        val root = activeApp() ?: error("Finestra applicativa non disponibile, bloccata o protetta.")
+        observed = root.windowKey()
         val pkg = root.packageName?.toString() ?: _foregroundPackage.value
         val displayMetrics = resources.displayMetrics
         val lines = mutableListOf<String>()
@@ -54,6 +62,7 @@ class MobHarnAccessibilityService : AccessibilityService() {
         var index = 0
         fun traverse(node: AccessibilityNodeInfo?, depth: Int) {
             if (node == null || index >= maxNodes || depth > 18) return
+            if (node.isPassword) return
             val text = node.text?.toString()?.trim().orEmpty()
             val desc = node.contentDescription?.toString()?.trim().orEmpty()
             val clickable = node.isClickable
@@ -108,40 +117,103 @@ class MobHarnAccessibilityService : AccessibilityService() {
         }
     }
 
-    suspend fun tapByText(query: String): String {
-        val root = rootInActiveWindow ?: return "Nessuna finestra attiva accessibile."
-        val target = findNodeByQuery(root, query.trim())
-            ?: return "Elemento '$query' non trovato sullo schermo attuale."
+    internal data class Target(val window: WindowKey, val node: AccessibilityNodeInfo, val label: String,
+        val bounds: Rect, val mode: String, val query: String, val x: Int, val y: Int)
 
-        // Try standard accessibility click on node or clickable ancestor
-        var clickableNode: AccessibilityNodeInfo? = target
-        while (clickableNode != null && !clickableNode.isClickable) {
-            clickableNode = clickableNode.parent
+    private fun candidates(root: AccessibilityNodeInfo, mode: String, q: String, x: Int, y: Int): List<AccessibilityNodeInfo> {
+        val matches = mutableListOf<AccessibilityNodeInfo>()
+        var budget = 600
+        fun visit(n: AccessibilityNodeInfo, depth: Int) {
+            if (--budget < 0 || depth > 24 || n.isPassword) return
+            val rect = Rect().also { n.getBoundsInScreen(it) }
+            val labels = listOfNotNull(n.text, n.contentDescription, if (Build.VERSION.SDK_INT >= 26) n.hintText else null, n.viewIdResourceName).map { it.toString() }
+            val hit = when (mode) {
+                "text" -> q.isNotBlank() && labels.any { it.equals(q, true) }
+                "point" -> rect.centerX() == x && rect.centerY() == y && labels.any { it.isNotBlank() }
+                "input" -> n.isEditable && (if (q.isBlank()) n.isFocused else labels.any { it.equals(q, true) })
+                "scroll" -> n.isScrollable
+                else -> false
+            }
+            if (hit && n.isEnabled && n.isVisibleToUser && !rect.isEmpty) matches.add(n)
+            for (i in 0 until n.childCount) { if (budget <= 0) break; n.getChild(i)?.let { visit(it, depth + 1) } }
         }
-        if (clickableNode != null && clickableNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-            return "Tap eseguito su '$query'."
-        }
-
-        // Fallback to gesture tap at center of bounding box
-        val rect = Rect()
-        target.getBoundsInScreen(rect)
-        if (rect.width() > 0 && rect.height() > 0) {
-            val ok = performTapGesture(rect.centerX().toFloat(), rect.centerY().toFloat())
-            return if (ok) "Gesture tap eseguito su '$query' @(${rect.centerX()},${rect.centerY()})."
-            else "Impossibile eseguire il tap su '$query'."
-        }
-        return "Elemento '$query' trovato ma non cliccabile."
+        visit(root, 0)
+        return if (budget <= 0) emptyList() else matches
     }
 
-    suspend fun tapCoordinates(x: Float, y: Float): String {
-        val ok = performTapGesture(x, y)
-        return if (ok) "Tap eseguito alle coordinate (${x.toInt()}, ${y.toInt()})."
-        else "Gesture tap fallito alle coordinate (${x.toInt()}, ${y.toInt()})."
+    private fun signature(n: AccessibilityNodeInfo) = listOf(n.className, n.viewIdResourceName, n.text, n.contentDescription).joinToString("\u0000")
+    internal fun prepare(mode: String, query: String = "", x: Int = -1, y: Int = -1): Target? {
+        val root = activeApp() ?: return null
+        if (root.windowKey() != observed) return null
+        return identify(root, mode, query, x, y)
     }
 
-    fun typeText(fieldHint: String, textToType: String): String {
-        val root = rootInActiveWindow ?: return "Nessuna finestra attiva accessibile."
-        return typeTextInternal(root, fieldHint, textToType)
+    internal fun identify(root: AccessibilityNodeInfo, mode: String, query: String, x: Int, y: Int): Target? {
+        val n = candidates(root, mode, query.trim(), x, y).singleOrNull() ?: return null
+        return Target(root.windowKey(), n, signature(n), Rect().also { n.getBoundsInScreen(it) }, mode, query.trim(), x, y)
+    }
+
+    internal suspend fun applyTarget(target: Target?, value: String = ""): String {
+        val t = target ?: error("Nessun bersaglio univoco sulla schermata letta. Rileggi prima di agire.")
+        val root = withTimeoutOrNull(3200L) {
+            var r = activeApp()
+            while (r?.windowKey() != t.window) { kotlinx.coroutines.delay(120); r = activeApp() }
+            r
+        } ?: error("La finestra autorizzata non è tornata in primo piano. Nessuna azione.")
+        val n = requireNotNull(resolveTarget(root, t)) { "Il bersaglio è cambiato. Nessuna azione." }
+        check(activeApp()?.windowKey() == t.window) { "Finestra cambiata." }
+        observed = null // Require a fresh read before the next action.
+        when (t.mode) {
+            "input" -> check(n.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, value) })) { "Digitazione rifiutata." }
+            "scroll" -> {
+                val action = when (value.lowercase().trim()) {
+                    "down" -> AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_DOWN
+                    "up" -> AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_UP
+                    "left" -> AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_LEFT
+                    "right" -> AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_RIGHT
+                    else -> error("Direzione non valida.")
+                }
+                check(n.performAction(action.id)) { "Scorrimento rifiutato." }
+            }
+            else -> {
+                val rect = Rect().also { n.getBoundsInScreen(it) }
+                check(t.mode != "point" || t.bounds == rect) { "Coordinate cambiate: rileggi la schermata." }
+                var click: AccessibilityNodeInfo? = n
+                while (click != null && !click.isClickable) click = click.parent
+                check(click != null && click.isVisibleToUser && click.isEnabled && click.performAction(AccessibilityNodeInfo.ACTION_CLICK)) { "Tap non accettato. Nessun tocco alla cieca." }
+                showTap(rect.centerX(), rect.centerY())
+            }
+        }
+        return "Azione inviata all'app autorizzata. Rileggi lo schermo per verificarne l'effetto."
+    }
+
+    internal fun resolveTarget(root: AccessibilityNodeInfo, t: Target): AccessibilityNodeInfo? {
+        if (root.windowKey() != t.window) return null
+        return candidates(root, t.mode, t.query, t.x, t.y).singleOrNull()?.takeIf {
+            it == t.node && signature(it) == t.label
+        }
+    }
+
+    private fun showTap(x: Int, y: Int) {
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            if (instance !== this) return@post
+            val wm = getSystemService(WINDOW_SERVICE) as android.view.WindowManager
+            val size = (32 * resources.displayMetrics.density).toInt()
+            val ring = android.view.View(this).apply {
+                importantForAccessibility = android.view.View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    shape = android.graphics.drawable.GradientDrawable.OVAL
+                    setColor(0x3355CCFF); setStroke(4, 0xFF00AADD.toInt())
+                }
+            }
+            val lp = android.view.WindowManager.LayoutParams(size, size, android.view.WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                android.view.WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or android.view.WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or android.view.WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                android.graphics.PixelFormat.TRANSLUCENT).apply {
+                    gravity = android.view.Gravity.TOP or android.view.Gravity.LEFT
+                    this.x = x - size / 2; this.y = y - size / 2
+                }
+            if (runCatching { wm.addView(ring, lp) }.isSuccess) ring.postDelayed({ runCatching { wm.removeView(ring) } }, 450)
+        }
     }
 
     internal fun typeTextInternal(
@@ -183,34 +255,6 @@ class MobHarnAccessibilityService : AccessibilityService() {
         }
     }
 
-    suspend fun scrollScreen(direction: String): String {
-        val dm = resources.displayMetrics
-        val cx = dm.widthPixels / 2f
-        val cy = dm.heightPixels / 2f
-        val path = Path()
-        when (direction.lowercase().trim()) {
-            "up" -> {
-                path.moveTo(cx, dm.heightPixels * 0.28f)
-                path.lineTo(cx, dm.heightPixels * 0.76f)
-            }
-            "left" -> {
-                path.moveTo(dm.widthPixels * 0.8f, cy)
-                path.lineTo(dm.widthPixels * 0.2f, cy)
-            }
-            "right" -> {
-                path.moveTo(dm.widthPixels * 0.2f, cy)
-                path.lineTo(dm.widthPixels * 0.8f, cy)
-            }
-            else -> { // down
-                path.moveTo(cx, dm.heightPixels * 0.76f)
-                path.lineTo(cx, dm.heightPixels * 0.28f)
-            }
-        }
-        val ok = dispatchPathGesture(path, durationMs = 280L)
-        return if (ok) "Scorrimento '$direction' eseguito."
-        else "Scorrimento '$direction' non riuscito."
-    }
-
     private val recentsRoutine = RecentsRoutine()
 
     suspend fun openVerifiedRecents(stillAllowed: () -> Boolean = { true }): String = recentsRoutine.run(
@@ -239,51 +283,6 @@ class MobHarnAccessibilityService : AccessibilityService() {
         val ok = performGlobalAction(action)
         return if (ok) "Azione di sistema '$actionName' eseguita."
         else "Impossibile eseguire l'azione '$actionName'."
-    }
-
-    private suspend fun performTapGesture(x: Float, y: Float): Boolean {
-        val path = Path().apply { moveTo(x.coerceAtLeast(1f), y.coerceAtLeast(1f)) }
-        return dispatchPathGesture(path, durationMs = 60L)
-    }
-
-    private suspend fun dispatchPathGesture(path: Path, durationMs: Long): Boolean {
-        val stroke = GestureDescription.StrokeDescription(path, 0L, durationMs)
-        val gesture = GestureDescription.Builder().addStroke(stroke).build()
-        val deferred = CompletableDeferred<Boolean>()
-        val started = dispatchGesture(
-            gesture,
-            object : GestureResultCallback() {
-                override fun onCompleted(gestureDescription: GestureDescription?) {
-                    if (!deferred.isCompleted) deferred.complete(true)
-                }
-
-                override fun onCancelled(gestureDescription: GestureDescription?) {
-                    if (!deferred.isCompleted) deferred.complete(false)
-                }
-            },
-            null
-        )
-        if (!started) return false
-        return withTimeoutOrNull(2500L) { deferred.await() } ?: false
-    }
-
-    private fun findNodeByQuery(root: AccessibilityNodeInfo, query: String): AccessibilityNodeInfo? {
-        val direct = root.findAccessibilityNodeInfosByText(query)
-        if (!direct.isNullOrEmpty()) return direct.first()
-
-        var match: AccessibilityNodeInfo? = null
-        fun walk(node: AccessibilityNodeInfo?) {
-            if (node == null || match != null) return
-            val t = node.text?.toString().orEmpty()
-            val d = node.contentDescription?.toString().orEmpty()
-            if (t.contains(query, ignoreCase = true) || d.contains(query, ignoreCase = true)) {
-                match = node
-                return
-            }
-            for (i in 0 until node.childCount) walk(node.getChild(i))
-        }
-        walk(root)
-        return match
     }
 
     internal fun findEditableByQuery(root: AccessibilityNodeInfo, query: String): AccessibilityNodeInfo? {

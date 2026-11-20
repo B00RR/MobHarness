@@ -118,6 +118,7 @@ class ToolExecutionMonitor(
         isExternalOrMutating: Boolean = false,
         approvalDescription: String = "",
         exactCommand: List<String>? = null,
+        verifyBeforeSaving: (suspend () -> String?)? = null,
         block: suspend () -> String
     ): String = runBlocking {
         val normSig = toolName.lowercase() to argsSummary.trim().lowercase().replace(Regex("\\s+"), " ")
@@ -125,9 +126,9 @@ class ToolExecutionMonitor(
             val sameExact = turnCallSignatures.any { it == normSig }
             val sameToolCount = turnCallSignatures.count { it.first == normSig.first }
             when {
-                sameExact -> "Hai già eseguito $toolName con questi stessi parametri. NON richiamare altri tool: rispondi subito all'utente in italiano usando i dati già ottenuti."
+                sameExact && toolName != "read_screen_ui" -> "Hai già eseguito $toolName con questi stessi parametri. NON richiamare altri tool: rispondi subito all'utente in italiano usando i dati già ottenuti."
                 sameToolCount >= 2 && toolName == "web_search" -> "Hai già effettuato 2 ricerche web in questo turno. NON fare altre ricerche: rispondi ora all'utente in italiano con le informazioni raccolte."
-                turnCallSignatures.size >= 5 || turnAttemptCount >= 6 -> "Limite di chiamate tool per turno raggiunto. Rispondi subito all'utente in italiano con i risultati già ottenuti."
+                turnCallSignatures.size >= (if (category == ToolGroup.PHONE_USE.id) 12 else 5) || turnAttemptCount >= (if (category == ToolGroup.PHONE_USE.id) 14 else 6) -> "Limite di chiamate tool per turno raggiunto. Rispondi subito all'utente in italiano con i risultati già ottenuti."
                 else -> {
                     turnAttemptCount++
                     null
@@ -150,7 +151,8 @@ class ToolExecutionMonitor(
             )
         )
 
-        if (isExternalOrMutating && requireApprovalForExternal) {
+        verifyBeforeSaving?.invoke()?.let { return@runBlocking it }
+        if (verifyBeforeSaving != null || (isExternalOrMutating && requireApprovalForExternal)) {
             val granted = approvalCoordinator.requestApproval(
                 toolName = toolName,
                 category = category,
@@ -779,6 +781,7 @@ class MobHarnToolkitRegistry(
     val webCalcTools = WebAndCalcToolSet(system, sandbox, monitor)
     val telemetryTools = DeviceTelemetryToolSet(system, monitor)
     val automationTools = AutomationToolSet(repository, scheduler, monitor)
+    val dataTools = DataToolSet(repository, sandbox, monitor)
     val selfEvolveTools = SelfEvolveToolSet(repository, sandbox, monitor)
     val phoneUseTools = PhoneUseToolSet(monitor)
     /** Offer phone controls only while the user-enabled accessibility service is connected. */
@@ -794,6 +797,7 @@ class MobHarnToolkitRegistry(
         if (ToolGroup.ANDROID_ACTIONS.id in enabledGroups) providers.add(tool(androidTools))
         if (ToolGroup.TELEMETRY.id in enabledGroups) providers.add(tool(telemetryTools))
         if (ToolGroup.AUTOMATIONS.id in enabledGroups) providers.add(tool(automationTools))
+        if ("data_tools" in enabledGroups || ToolGroup.SELF_EVOLVE.id in enabledGroups) providers.add(tool(dataTools))
         if (ToolGroup.SELF_EVOLVE.id in enabledGroups) providers.add(tool(selfEvolveTools))
         if (ToolGroup.PHONE_USE.id in enabledGroups) providers.add(tool(phoneUseTools))
         return providers
@@ -804,7 +808,10 @@ class MobHarnToolkitRegistry(
      * LiteRT-LM's strict C++ ANTLR parser fails on a slightly malformed call (e.g. `"` instead of `<|"|>`).
      */
     fun invokeToolByName(rawName: String, args: Map<String, Any?>, routedGroups: Set<String>): String? {
-        val phone = phoneUseTools.takeIf { ToolGroup.PHONE_USE.id in routedGroups }
+        fun gated(group: String, call: () -> String): String =
+            if (group in routedGroups || (group == "data_tools" && "self_evolve" in routedGroups)) call()
+            else "Strumento non attivo in questo turno. Non aggirare il gruppo o i permessi."
+
         val normalized = ToolCallRecoveryParser.normalizeToolName(rawName)
         if (normalized.isBlank()) return null
 
@@ -866,30 +873,30 @@ class MobHarnToolkitRegistry(
 
         return when (normalized) {
             // Web & Calc
-            "web_search", "search_web", "google_search", "search", "internet_search", "wiki_search", "wikipedia" -> {
+            "web_search", "search_web", "google_search", "search", "internet_search", "wiki_search", "wikipedia" -> gated("web_calc") {
                 val q = str("query", "q", "search_query", "text", "topic")
                 if (q.isBlank()) "Errore web_search: parametro 'query' mancante o vuoto."
                 else webCalcTools.web_search(q)
             }
-            "fetch_webpage", "fetch_url", "read_webpage", "browse_url", "get_webpage" -> {
+            "fetch_webpage", "fetch_url", "read_webpage", "browse_url", "get_webpage" -> gated("web_calc") {
                 val url = str("url", "link", "href")
                 if (url.isBlank()) "Errore fetch_webpage: parametro 'url' mancante o vuoto."
                 else webCalcTools.fetch_webpage(url)
             }
-            "calculate_expression", "calculate", "calc", "calculator", "math", "eval_math" -> {
+            "calculate_expression", "calculate", "calc", "calculator", "math", "eval_math" -> gated("web_calc") {
                 val expr = str("expression", "expr", "formula", "input")
                 if (expr.isBlank()) "Errore calculate_expression: parametro 'expression' mancante o vuoto."
                 else webCalcTools.calculate_expression(expr)
             }
-            "validate_json_regex", "validate_json_or_regex" ->
+            "validate_json_regex", "validate_json_or_regex" -> gated("web_calc") {
                 webCalcTools.validate_json_regex(
                     mode = str("mode", default = "json"),
                     input = str("input", "text", "data"),
                     pattern = str("pattern", "regex")
                 )
-
+            }
             // Memory & Skills
-            "save_memory", "remember_fact", "remember", "remember_this", "memorize", "add_memory" -> {
+            "save_memory", "remember_fact", "remember", "remember_this", "memorize", "add_memory" -> gated("memory") {
                 val content = str("content", "value", "fact", "text")
                 if (content.isBlank()) "Errore save_memory: parametro 'content' mancante o vuoto."
                 else memoryTools.save_memory(
@@ -899,119 +906,139 @@ class MobHarnToolkitRegistry(
                     importance = intArg("importance", "priority", default = 3)
                 )
             }
-            "search_memory", "recall_memory", "get_memory", "get_memories", "find_memory" ->
+            "search_memory", "recall_memory", "get_memory", "get_memories", "find_memory" -> gated("memory") {
                 memoryTools.search_memory(str("query", "q", "keyword", "key"))
-            "delete_memory", "forget_memory" ->
+            }
+            "delete_memory", "forget_memory" -> gated("memory") {
                 memoryTools.delete_memory(str("query", "keyName", "key", "q"))
-            "search_past_sessions", "search_history" ->
+            }
+            "search_past_sessions", "search_history" -> gated("memory") {
                 memoryTools.search_past_sessions(str("query", "q", "keyword"))
-            "list_skills" ->
+            }
+            "list_skills" -> gated("memory") {
                 memoryTools.list_skills()
-            "load_skill", "use_skill", "get_skill" -> {
+            }
+            "load_skill", "use_skill", "get_skill" -> gated("memory") {
                 val slug = str("slug", "name", "skill")
                 if (slug.isBlank()) "Errore load_skill: parametro 'slug' mancante."
                 else memoryTools.load_skill(slug)
             }
-            "save_skill", "create_skill", "learn_skill" ->
+            "save_skill", "create_skill", "learn_skill" -> gated("memory") {
                 memoryTools.save_skill(
                     slug = str("slug", "name", default = "skill_${System.currentTimeMillis() % 10000}"),
                     title = str("title", "name", default = "Skill appresa"),
                     description = str("description", "desc", default = "Procedura appresa in chat"),
                     instructionsMd = str("instructionsMd", "instructions_md", "instructions", "content")
                 )
-
+            }
             // Android System Actions
-            "launch_app", "open_app", "start_app" -> {
+            "launch_app", "open_app", "start_app" -> gated("android_actions") {
                 val app = str("appName", "app_name", "app", "name", "package")
                 if (app.isBlank()) "Errore launch_app: specifica il nome dell'app da aprire."
                 else androidTools.launch_app(app)
             }
-            "open_url", "open_link", "open_browser" -> {
+            "open_url", "open_link", "open_browser" -> gated("android_actions") {
                 val url = str("url", "link")
                 if (url.isBlank()) "Errore open_url: specifica l'URL da aprire."
                 else androidTools.open_url(url)
             }
-            "open_maps", "maps" -> {
+            "open_maps", "maps" -> gated("android_actions") {
                 val query = str("query", "location", "place", "address")
                 if (query.isBlank()) "Errore open_maps: specifica un luogo o indirizzo."
                 else androidTools.open_maps(query)
             }
-            "set_alarm" ->
+            "set_alarm" -> gated("android_actions") {
                 androidTools.set_alarm(
                     hour = intArg("hour", "hours", "h", default = 8),
                     minute = intArg("minute", "minutes", "m", default = 0),
                     message = str("message", "label", "title", default = "MobHarn")
                 )
-            "set_timer", "start_timer" ->
+            }
+            "set_timer", "start_timer" -> gated("android_actions") {
                 androidTools.set_timer(
                     seconds = intArg("seconds", "duration", "sec", default = 60),
                     message = str("message", "label", default = "Timer MobHarn")
                 )
-            "create_calendar_event" ->
+            }
+            "create_calendar_event" -> gated("android_actions") {
                 androidTools.create_calendar_event(
                     title = str("title", "name", default = "Evento"),
                     description = str("description", "notes"),
                     startInMinutes = intArg("startInMinutes", "start_in_minutes", default = 60),
                     durationMinutes = intArg("durationMinutes", "duration_minutes", default = 60)
                 )
-            "compose_email", "draft_email" ->
+            }
+            "compose_email", "draft_email" -> gated("android_actions") {
                 androidTools.compose_email(
                     to = str("to", "recipient", "email"),
                     subject = str("subject", "title"),
                     body = str("body", "text", "message")
                 )
-            "compose_sms", "draft_sms" ->
+            }
+            "compose_sms", "draft_sms" -> gated("android_actions") {
                 androidTools.compose_sms(
                     phoneNumber = str("phoneNumber", "phone_number", "to", "number"),
                     message = str("message", "body", "text")
                 )
-            "dial_number", "call_number" ->
+            }
+            "dial_number", "call_number" -> gated("android_actions") {
                 androidTools.dial_number(str("phoneNumber", "phone_number", "number"))
-            "share_text" ->
+            }
+            "share_text" -> gated("android_actions") {
                 androidTools.share_text(str("text", "content", "message"))
-            "open_system_settings", "open_settings" ->
+            }
+            "open_system_settings", "open_settings" -> gated("android_actions") {
                 androidTools.open_system_settings(str("section", "setting", default = "general"))
-
+            }
             // Coding Workspace & Sandbox
-            "list_workspace_files", "list_files" ->
+            "list_workspace_files", "list_files" -> gated("coding") {
                 codingTools.list_workspace_files()
-            "read_file_lines", "read_file", "read_workspace_file" ->
+            }
+            "read_file_lines", "read_file", "read_workspace_file" -> gated("coding") {
                 codingTools.read_file_lines(
                     relativePath = str("relativePath", "relative_path", "path", "file"),
                     startLine = intArg("startLine", "start_line", default = 1),
                     endLine = intArg("endLine", "end_line", default = 150)
                 )
-            "write_workspace_file", "write_file" ->
+            }
+            "write_workspace_file", "write_file" -> gated("coding") {
                 codingTools.write_workspace_file(
                     relativePath = str("relativePath", "relative_path", "path", "file"),
                     content = str("content", "code", "text"),
                     summary = str("summary", default = "Aggiornato da Gemma 4")
                 )
-            "patch_workspace_file", "patch_file" ->
+            }
+            "patch_workspace_file", "patch_file" -> gated("coding") {
                 codingTools.patch_workspace_file(
                     relativePath = str("relativePath", "relative_path", "path", "file"),
                     oldText = str("oldText", "old_text", "search"),
                     newText = str("newText", "new_text", "replace")
                 )
-            "search_code", "grep_workspace" ->
+            }
+            "search_code", "grep_workspace" -> gated("coding") {
                 codingTools.search_code(str("pattern", "query", "q"))
-            "run_js_sandbox", "run_javascript", "run_js", "execute_js" ->
+            }
+            "run_js_sandbox", "run_javascript", "run_js", "execute_js" -> gated("coding") {
                 codingTools.run_js_sandbox(str("code", "script", "js"))
-            "run_sql_sandbox", "run_sql", "execute_sql" ->
+            }
+            "run_sql_sandbox", "run_sql", "execute_sql" -> gated("coding") {
                 codingTools.run_sql_sandbox(str("sqlScript", "sql_script", "sql", "query"))
-
+            }
             // Telemetry
-            "get_device_telemetry", "device_telemetry", "telemetry", "get_telemetry", "battery_status" ->
+            "get_device_telemetry", "device_telemetry", "telemetry", "get_telemetry", "battery_status" -> gated("telemetry") {
                 telemetryTools.get_device_telemetry()
-            "read_clipboard", "get_clipboard" ->
+            }
+            "read_clipboard", "get_clipboard" -> gated("telemetry") {
                 telemetryTools.read_clipboard()
-            "get_sensor_snapshot", "get_sensors" ->
+            }
+            "get_sensor_snapshot", "get_sensors" -> gated("telemetry") {
                 telemetryTools.get_sensor_snapshot()
-            "get_approx_location", "get_location" ->
+            }
+            "get_approx_location", "get_location" -> gated("telemetry") {
                 telemetryTools.get_approx_location()
-
+            }
             // Automations
-            "schedule_automation" ->
+            "schedule_automation" -> gated("automations") {
                 automationTools.schedule_automation(
                     name = str("name", "title", default = "Automazione"),
                     prompt = str("prompt", "instruction", "query"),
@@ -1019,31 +1046,38 @@ class MobHarnToolkitRegistry(
                     intervalMinutes = intArg("intervalMinutes", "interval_minutes", default = 60),
                     isPeriodic = boolArg("isPeriodic", "is_periodic", default = true)
                 )
-
+            }
             // Self-Evolve
-            "create_custom_tool" ->
-                selfEvolveTools.create_custom_tool(
+            "create_custom_tool" -> gated("data_tools") {
+                dataTools.create_custom_tool(
                     name = str("name"),
                     description = str("description"),
                     parametersDoc = str("parametersDoc", "parameters_doc", default = "inputJson"),
-                    jsCode = str("jsCode", "js_code", "code")
+                    jsCode = str("jsCode", "js_code", "code"),
+                    exampleInput = lookup("exampleInput")?.toString().orEmpty(),
+                    expectedJson = lookup("expectedJson")?.toString().orEmpty()
                 )
-            "list_custom_tools" ->
-                selfEvolveTools.list_custom_tools()
-            "run_custom_tool" ->
-                selfEvolveTools.run_custom_tool(
+            }
+            "list_custom_tools" -> gated("data_tools") {
+                dataTools.list_custom_tools()
+            }
+            "run_custom_tool" -> gated("data_tools") {
+                dataTools.run_custom_tool(
                     name = str("name"),
                     inputJson = str("inputJson", "input_json", "input", default = "{}")
                 )
-            "delete_custom_tool" ->
+            }
+            "delete_custom_tool" -> gated("self_evolve") {
                 selfEvolveTools.delete_custom_tool(str("name"))
-            "update_soul_md" ->
+            }
+            "update_soul_md" -> gated("self_evolve") {
                 selfEvolveTools.update_soul_md(
                     mode = str("mode", default = "append"),
                     content = str("content", "text"),
                     rationale = str("rationale", default = "Miglioramento harness")
                 )
-            "tune_harness_settings", "tune_harness_params" ->
+            }
+            "tune_harness_settings", "tune_harness_params" -> gated("self_evolve") {
                 selfEvolveTools.tune_harness_settings(
                     temperature = doubleArg("temperature", default = -1.0),
                     topP = doubleArg("topP", "top_p", default = -1.0),
@@ -1051,28 +1085,33 @@ class MobHarnToolkitRegistry(
                     activeProject = str("activeProject", "active_project"),
                     enableToolGroup = str("enableToolGroup", "enable_tool_group")
                 )
-
+            }
             // Phone-Use
-            "read_screen_ui", "read_screen" ->
-                phone?.read_screen_ui(intArg("maxNodes", "max_nodes", default = 80))
-            "tap_screen_text", "tap_element" ->
-                phone?.tap_screen_text(str("targetText", "target_text", "text", "label"))
-            "tap_screen_coords", "tap_coordinates" ->
-                phone?.tap_screen_coords(
+            "read_screen_ui", "read_screen" -> gated("phone_use") {
+                phoneUseTools.read_screen_ui(intArg("maxNodes", "max_nodes", default = 80))
+            }
+            "tap_screen_text", "tap_element" -> gated("phone_use") {
+                phoneUseTools.tap_screen_text(str("targetText", "target_text", "text", "label"))
+            }
+            "tap_screen_coords", "tap_coordinates" -> gated("phone_use") {
+                phoneUseTools.tap_screen_coords(
                     x = intArg("x", default = 0),
                     y = intArg("y", default = 0)
                 )
-            "type_screen_text", "type_text" ->
-                phone?.type_screen_text(
+            }
+            "type_screen_text", "type_text" -> gated("phone_use") {
+                phoneUseTools.type_screen_text(
                     fieldHint = str("fieldHint", "field_hint", "hint"),
                     text = str("text", "value")
                 )
-            "scroll_screen" ->
-                phone?.scroll_screen(str("direction", default = "down"))
-            "phone_global_action", "system_navigate" ->
-                phone?.phone_global_action(str("action", "command", default = "home"))
-
-            else -> null
+            }
+            "scroll_screen" -> gated("phone_use") {
+                phoneUseTools.scroll_screen(str("direction", default = "down"))
+            }
+            "phone_global_action", "system_navigate" -> gated("phone_use") {
+                phoneUseTools.phone_global_action(str("action", "command", default = "home"))
+            }
+            else -> "Strumento non disponibile. Riusa un tool attivo; per dati prova un custom tool locale. Per nuove capacità Android chiedi all’utente, senza eseguire nulla."
         }
     }
 }
@@ -1210,5 +1249,7 @@ fun routeToolGroupsForPrompt(userPrompt: String, enabledGroups: Set<String>, acc
 
     return selected.take(2).toMutableSet().apply {
         if (accessibilityConnected && ToolGroup.PHONE_USE.id in enabledGroups) add(ToolGroup.PHONE_USE.id)
+        if (ToolGroup.SELF_EVOLVE.id in enabledGroups && ToolGroup.SELF_EVOLVE.id !in this &&
+            (p.containsAny("convert", "trasform", "estrai", "estrarre", "analizza", "formato", "csv", "json", "parser", "strumento", "tool", "elabora", "ordina", "raggruppa") || ToolGroup.CODING.id in this)) add("data_tools")
     }
 }
