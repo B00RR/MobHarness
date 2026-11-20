@@ -12,6 +12,12 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [32])
 class VerifiedToolsTest {
+    @org.junit.Before fun initializeScheduler() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        if (runCatching { androidx.work.WorkManager.getInstance(context) }.isFailure) {
+            androidx.work.WorkManager.initialize(context, androidx.work.Configuration.Builder().build())
+        }
+    }
     @Test fun unknownToolExplainsNextStepInsteadOfDisappearing() {
         val registry = MobHarnAppContainer.getInstance(ApplicationProvider.getApplicationContext<Context>()).toolkitRegistry
         assertTrue(registry.invokeToolByName("missing_example", emptyMap(), emptySet()).orEmpty().contains("non disponibile"))
