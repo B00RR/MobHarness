@@ -278,6 +278,7 @@ fun StudioScreen(
                     onSaveFile = viewModel::saveCurrentFile,
                     onRollback = viewModel::rollbackSelectedFile,
                     onDeleteFile = viewModel::deleteSelectedFile,
+                    onDismissDiff = viewModel::dismissDiffPreview,
                     onSelectSandboxMode = viewModel::setSandboxMode,
                     onRunSandbox = viewModel::runActiveCodeInSandbox,
                     onShowMessage = onShowMessage
@@ -349,6 +350,7 @@ private fun CodingWorkspaceTab(
     onSaveFile: () -> Unit,
     onRollback: () -> Unit,
     onDeleteFile: () -> Unit,
+    onDismissDiff: () -> Unit,
     onSelectSandboxMode: (SandboxMode) -> Unit,
     onRunSandbox: () -> Unit,
     onShowMessage: (String) -> Unit
@@ -499,6 +501,7 @@ private fun CodingWorkspaceTab(
                             }
                             IconButton(
                                 onClick = onSaveFile,
+                                enabled = uiState.canEditSelectedFile,
                                 modifier = Modifier.testTag("save_code_file_button")
                             ) {
                                 Icon(Icons.Default.Save, contentDescription = "Salva", tint = Color(0xFF7BE0B8))
@@ -561,6 +564,40 @@ private fun CodingWorkspaceTab(
                                 .weight(1f)
                                 .horizontalScroll(rememberScrollState())
                                 .testTag("code_editor_input")
+                        )
+                    }
+                }
+            }
+        }
+
+        if (!uiState.lastDiffPreview.isNullOrBlank()) {
+            item {
+                Surface(
+                    color = CodeSurfaceDark,
+                    border = BorderStroke(1.dp, Color(0xFF253438)),
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier.fillMaxWidth().testTag("workspace_diff_preview")
+                ) {
+                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = "Ultimo diff",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = Color(0xFF7BE0B8)
+                            )
+                            TextButton(onClick = onDismissDiff) {
+                                Text("Chiudi", style = MaterialTheme.typography.labelSmall)
+                            }
+                        }
+                        Text(
+                            text = uiState.lastDiffPreview.orEmpty(),
+                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = JetBrainsMonoFontFamily),
+                            color = Color(0xFFE5ECE8),
+                            modifier = Modifier.horizontalScroll(rememberScrollState())
                         )
                     }
                 }

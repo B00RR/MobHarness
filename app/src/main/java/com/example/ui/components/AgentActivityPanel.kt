@@ -92,6 +92,8 @@ private fun describeToolAction(toolName: String): ToolPresentation = when (toolN
     "read_file", "read_file_lines" -> ToolPresentation("Lettura file", "File letto", Icons.Default.Description)
     "write_file", "write_workspace_file", "patch_file", "patch_workspace_file" ->
         ToolPresentation("Modifica file", "File modificato", Icons.Default.Code)
+    "undo_workspace_file", "undo_workspace_change", "rollback_workspace_file", "undo_file", "revert_file" ->
+        ToolPresentation("Ripristino file", "Modifica annullata", Icons.Default.Code)
     "list_workspace_files", "grep_workspace", "search_code" ->
         ToolPresentation("Esplorazione workspace", "Workspace esplorato", Icons.Default.FolderOpen)
     "run_javascript", "run_js_sandbox", "run_sql", "run_sql_sandbox", "validate_json_or_regex", "validate_json_regex" ->

@@ -12,6 +12,7 @@ import com.example.data.db.ToolExecutionLogEntity
 import com.example.data.db.WorkspaceSnapshotEntity
 import com.example.data.prefs.AppPreferences
 import com.example.data.workspace.WorkspaceFileInfo
+import com.example.data.workspace.WorkspaceWritePolicy
 import com.example.di.MobHarnAppContainer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -38,6 +39,10 @@ data class StudioUiState(
     val files: List<WorkspaceFileInfo> = emptyList(),
     val selectedFile: String? = null,
     val editorContent: String = "",
+    val loadedFileSha256: String? = null,
+    val loadedFileExisted: Boolean = false,
+    val canEditSelectedFile: Boolean = true,
+    val lastDiffPreview: String? = null,
     val isDirty: Boolean = false,
     val sandboxMode: SandboxMode = SandboxMode.JS,
     val sandboxOutput: String = "Pronto. Premi 'Esegui' per testare il file JS/SQL attivo oppure apri 'Web Preview'.",
@@ -108,7 +113,7 @@ class StudioViewModel(
             files.firstOrNull { it.extension == "js" }?.relativePath
                 ?: files.firstOrNull()?.relativePath
         }
-        val content = chosen?.let { workspace.readFile(projectName, it) }.orEmpty()
+        val doc = chosen?.let { repo.openWorkspaceFileForEditor(projectName, it).getOrNull() }
         val preview = withContext(Dispatchers.IO) { workspace.buildPreviewHtml(projectName, chosen) }
         _uiState.update {
             it.copy(
@@ -116,12 +121,16 @@ class StudioViewModel(
                 activeProject = projectName,
                 files = files,
                 selectedFile = chosen,
-                editorContent = content,
+                editorContent = doc?.content.orEmpty(),
+                loadedFileSha256 = doc?.sha256,
+                loadedFileExisted = doc?.existed ?: false,
+                canEditSelectedFile = doc?.editable ?: true,
                 isDirty = false,
                 previewHtml = preview,
                 previewNonce = it.previewNonce + 1
             )
         }
+        doc?.notice?.let { _events.tryEmit(it) }
     }
 
     fun selectProject(projectName: String) {
@@ -143,7 +152,7 @@ class StudioViewModel(
     fun selectFile(relativePath: String) {
         viewModelScope.launch {
             val project = _uiState.value.activeProject
-            val content = workspace.readFile(project, relativePath).orEmpty()
+            val doc = repo.openWorkspaceFileForEditor(project, relativePath).getOrNull()
             val autoMode = when {
                 relativePath.endsWith(".sql", true) -> SandboxMode.SQL
                 relativePath.endsWith(".html", true) -> SandboxMode.PREVIEW
@@ -153,14 +162,18 @@ class StudioViewModel(
             val preview = withContext(Dispatchers.IO) { workspace.buildPreviewHtml(project, relativePath) }
             _uiState.update {
                 it.copy(
-                    selectedFile = relativePath,
-                    editorContent = content,
+                    selectedFile = doc?.normalizedPath ?: relativePath,
+                    editorContent = doc?.content.orEmpty(),
+                    loadedFileSha256 = doc?.sha256,
+                    loadedFileExisted = doc?.existed ?: false,
+                    canEditSelectedFile = doc?.editable ?: false,
                     isDirty = false,
                     sandboxMode = autoMode,
                     previewHtml = preview,
                     previewNonce = it.previewNonce + 1
                 )
             }
+            doc?.notice?.let { _events.tryEmit(it) }
         }
     }
 
@@ -175,54 +188,96 @@ class StudioViewModel(
                 relativePath.endsWith(".kt", true) -> "fun main() {\n    println(\"MobHarn Kotlin\")\n}\n"
                 else -> ""
             }
-            workspace.writeFile(project, relativePath, starter).onSuccess {
+            repo.writeWorkspaceFile(
+                projectName = project,
+                relativePath = relativePath,
+                content = starter,
+                summary = "Creato da Studio",
+                policy = WorkspaceWritePolicy.RequireAbsent
+            ).onSuccess { res ->
                 loadProject(project)
-                selectFile(relativePath)
-                _events.tryEmit("File '$relativePath' creato.")
+                selectFile(res.normalizedPath)
+                _uiState.update { it.copy(lastDiffPreview = res.diff) }
+                _events.tryEmit("File '${res.normalizedPath}' creato (snapshot registrato).")
             }.onFailure {
-                _events.tryEmit("Percorso non valido: ${it.message}")
+                _events.tryEmit("Impossibile creare '$relativePath': ${it.message}")
             }
         }
     }
 
     fun updateEditorContent(newContent: String) {
+        if (!_uiState.value.canEditSelectedFile) return
         _uiState.update { it.copy(editorContent = newContent, isDirty = true) }
     }
 
+    fun dismissDiffPreview() {
+        _uiState.update { it.copy(lastDiffPreview = null) }
+    }
+
     fun saveCurrentFile() {
+        viewModelScope.launch { saveCurrentFileInternal() }
+    }
+
+    private suspend fun saveCurrentFileInternal(): Boolean {
         val state = _uiState.value
-        val file = state.selectedFile ?: return
-        viewModelScope.launch {
-            workspace.writeFile(state.activeProject, file, state.editorContent).onSuccess { prev ->
-                repo.recordSnapshot(state.activeProject, file, prev, state.editorContent, "Modifica manuale editor")
-                val preview = withContext(Dispatchers.IO) { workspace.buildPreviewHtml(state.activeProject, file) }
+        val file = state.selectedFile ?: return false
+        val result = repo.writeWorkspaceFile(
+            projectName = state.activeProject,
+            relativePath = file,
+            content = state.editorContent,
+            summary = "Modifica manuale editor",
+            policy = WorkspaceWritePolicy.MatchExpectedBase(
+                expectedBaseSha256 = if (state.loadedFileExisted) state.loadedFileSha256 else null,
+                loadedInFull = state.canEditSelectedFile
+            )
+        )
+        return result.fold(
+            onSuccess = { res ->
+                val preview = withContext(Dispatchers.IO) { workspace.buildPreviewHtml(state.activeProject, res.normalizedPath) }
                 val files = workspace.listFiles(state.activeProject)
                 _uiState.update {
                     it.copy(
                         files = files,
+                        loadedFileSha256 = res.newSha256,
+                        loadedFileExisted = res.existsAfter,
                         isDirty = false,
+                        lastDiffPreview = if (res.changed) res.diff else it.lastDiffPreview,
                         previewHtml = preview,
                         previewNonce = it.previewNonce + 1
                     )
                 }
-                _events.tryEmit("Salvato '$file' (snapshot registrato).")
-            }.onFailure {
-                _events.tryEmit("Errore salvataggio: ${it.message}")
+                _events.tryEmit(
+                    if (res.changed) "Salvato '${res.normalizedPath}' (snapshot registrato)."
+                    else "Nessuna modifica su '${res.normalizedPath}'."
+                )
+                true
+            },
+            onFailure = { err ->
+                _events.tryEmit("Errore salvataggio: ${err.message}")
+                false
             }
-        }
+        )
     }
 
     fun rollbackSelectedFile() {
         val state = _uiState.value
         val file = state.selectedFile ?: return
         viewModelScope.launch {
-            val ok = repo.rollbackLatestSnapshot(state.activeProject, file)
-            if (ok) {
-                selectFile(file)
-                _events.tryEmit("Ripristinata versione precedente di '$file'.")
-            } else {
-                _events.tryEmit("Nessuno snapshot disponibile per '$file'.")
-            }
+            repo.undoLatestWorkspaceChange(state.activeProject, file)
+                .onSuccess { res ->
+                    if (res.existsAfter) {
+                        selectFile(res.normalizedPath)
+                        _uiState.update { it.copy(lastDiffPreview = res.diff) }
+                        _events.tryEmit("Ripristinata versione precedente di '${res.normalizedPath}'.")
+                    } else {
+                        loadProject(state.activeProject)
+                        _uiState.update { it.copy(lastDiffPreview = res.diff) }
+                        _events.tryEmit("Rimosso '${res.normalizedPath}' (non esisteva prima della modifica).")
+                    }
+                }
+                .onFailure { err ->
+                    _events.tryEmit(err.message ?: "Nessuno snapshot disponibile per '$file'.")
+                }
         }
     }
 
@@ -257,7 +312,7 @@ class StudioViewModel(
     fun runActiveCodeInSandbox() {
         val state = _uiState.value
         viewModelScope.launch {
-            if (state.isDirty) saveCurrentFile()
+            if (state.isDirty && !saveCurrentFileInternal()) return@launch
             if (state.sandboxMode == SandboxMode.PREVIEW) {
                 val html = withContext(Dispatchers.IO) {
                     workspace.buildPreviewHtml(state.activeProject, state.selectedFile)

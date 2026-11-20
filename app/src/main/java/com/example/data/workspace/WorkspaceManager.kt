@@ -21,7 +21,13 @@ data class CodeSearchMatch(
     val lineContent: String
 )
 
-internal fun readExcerpt(input: java.io.InputStream, size: Long, start: Int, end: Int, path: String): String {
+internal data class RawExcerptResult(
+    val formattedText: String,
+    val isPartial: Boolean,
+    val fullFileBytes: ByteArray?
+)
+
+internal fun readExcerptDetailed(input: java.io.InputStream, size: Long, start: Int, end: Int, path: String): RawExcerptResult {
     require(start > 0 && end >= start) { "Intervallo di righe non valido" }
     val last = minOf(end.toLong(), start.toLong() + 199).toInt()
     val bytes = java.io.ByteArrayOutputStream()
@@ -34,7 +40,8 @@ internal fun readExcerpt(input: java.io.InputStream, size: Long, start: Int, end
         for (i in 0 until n) if (chunk[i] == 10.toByte()) newlines++
     }
     val more = bytes.size().toLong() < size
-    val prefix = bytes.toString("UTF-8")
+    val rawBytes = bytes.toByteArray()
+    val prefix = String(rawBytes, Charsets.UTF_8)
     // Don't present a split UTF-8 character or incomplete final line as file content.
     val complete = if (more) prefix.substring(0, prefix.lastIndexOfAny(charArrayOf('\n', '\r')) + 1) else prefix
     return complete.reader().buffered().useLines { lines ->
@@ -45,10 +52,29 @@ internal fun readExcerpt(input: java.io.InputStream, size: Long, start: Int, end
                 append("\n${i.toString().padStart(4)} | ${rows.next()}")
             }
         }
-        val note = if (more || start > 1 || rows.hasNext()) " (lettura parziale)" else ""
-        "File: $path$note" + content.ifEmpty { "\nNessuna riga completa nell'intervallo letto." }
+        val partial = more || start > 1 || rows.hasNext()
+        val note = if (partial) " (lettura parziale)" else ""
+        val formatted = "File: $path$note" + content.ifEmpty { "\nNessuna riga completa nell'intervallo letto." }
+        RawExcerptResult(
+            formattedText = formatted,
+            isPartial = partial,
+            fullFileBytes = if (!more) rawBytes else null
+        )
     }
 }
+
+internal fun readExcerpt(input: java.io.InputStream, size: Long, start: Int, end: Int, path: String): String =
+    readExcerptDetailed(input, size, start, end, path).formattedText
+
+internal data class WorkspaceFileState(
+    val normalizedPath: String,
+    val file: File,
+    val exists: Boolean,
+    val bytes: ByteArray?,
+    val sha256: String?,
+    val sizeBytes: Long,
+    val lastModified: Long
+)
 
 class WorkspaceManager(context: Context) {
 
@@ -88,7 +114,7 @@ class WorkspaceManager(context: Context) {
         val root = projectDir(projectName)
         if (!root.exists()) return@withContext emptyList()
         root.walkTopDown()
-            .filter { it.isFile }
+            .filter { it.isFile && !it.name.startsWith(TEMP_FILE_PREFIX) }
             .map { file ->
                 val rel = file.relativeTo(root).path.replace(File.separatorChar, '/')
                 WorkspaceFileInfo(
@@ -113,12 +139,209 @@ class WorkspaceManager(context: Context) {
         relativePath: String,
         startLine: Int = 1,
         endLine: Int = 200
-    ): Result<String> = withContext(Dispatchers.IO) {
+    ): Result<String> = readFileLinesWithMeta(projectName, relativePath, startLine, endLine)
+        .map { it.formattedText }
+
+    internal suspend fun readFileLinesWithMeta(
+        projectName: String,
+        relativePath: String,
+        startLine: Int = 1,
+        endLine: Int = 200
+    ): Result<WorkspaceReadExcerpt> = withContext(Dispatchers.IO) {
         runCatching {
-            val file = requireNotNull(resolveSafeFile(projectName, relativePath)?.takeIf { it.isFile }) {
-                "File non trovato: $relativePath"
+            val (normPath, file) = resolveSafeFileInternal(projectName, relativePath)
+                ?: throw SecurityException("Percorso non valido: $relativePath")
+            require(file.isFile) { "File non trovato: $relativePath" }
+            val (raw, size) = file.inputStream().use { input ->
+                val fileSize = input.channel.size()
+                readExcerptDetailed(input, fileSize, startLine, endLine, normPath) to fileSize
             }
-            file.inputStream().use { input -> readExcerpt(input, input.channel.size(), startLine, endLine, relativePath) }
+            val sha = when {
+                raw.fullFileBytes != null -> sha256Hex(raw.fullFileBytes)
+                size <= MAX_EDITABLE_FILE_BYTES.toLong() ->
+                    runCatching { sha256Hex(readBoundedBytes(file, MAX_EDITABLE_FILE_BYTES)) }.getOrNull()
+                else -> null
+            }
+            WorkspaceReadExcerpt(
+                normalizedPath = normPath,
+                formattedText = raw.formattedText,
+                isPartial = raw.isPartial,
+                sha256 = sha,
+                sizeBytes = size
+            )
+        }
+    }
+
+    internal fun normalizeRelativePath(projectName: String, relativePath: String): String? =
+        resolveSafeFileInternal(projectName, relativePath)?.first
+
+    internal fun inspectFileState(
+        projectName: String,
+        relativePath: String,
+        maxBytes: Int = MAX_EDITABLE_FILE_BYTES
+    ): WorkspaceFileState {
+        val (normPath, file) = resolveSafeFileInternal(projectName, relativePath)
+            ?: throw SecurityException("Percorso non valido: $relativePath")
+        if (!file.exists()) {
+            return WorkspaceFileState(
+                normalizedPath = normPath,
+                file = file,
+                exists = false,
+                bytes = null,
+                sha256 = null,
+                sizeBytes = 0L,
+                lastModified = 0L
+            )
+        }
+        if (!file.isFile) {
+            throw IllegalArgumentException("Il percorso non è un file regolare: $normPath")
+        }
+        val bytes = readBoundedBytes(file, maxBytes)
+        return WorkspaceFileState(
+            normalizedPath = normPath,
+            file = file,
+            exists = true,
+            bytes = bytes,
+            sha256 = sha256Hex(bytes),
+            sizeBytes = bytes.size.toLong(),
+            lastModified = file.lastModified()
+        )
+    }
+
+    internal suspend fun writeBytesChecked(
+        targetFile: File,
+        newBytes: ByteArray,
+        expectedBeforeExists: Boolean,
+        expectedBeforeSha256: String?,
+        beforeSwap: (suspend () -> Unit)? = null
+    ) = withContext(Dispatchers.IO) {
+        val parent = targetFile.parentFile
+            ?: throw java.io.IOException("Directory padre mancante per '${targetFile.name}'.")
+        if (!parent.exists() && !parent.mkdirs()) {
+            throw java.io.IOException("Impossibile creare la directory per '${targetFile.name}'.")
+        }
+        val tempFile = File(
+            parent,
+            "$TEMP_FILE_PREFIX${targetFile.name}.${java.util.UUID.randomUUID().toString().take(8)}.tmp"
+        )
+        var swapped = false
+        try {
+            java.io.FileOutputStream(tempFile).use { fos ->
+                fos.write(newBytes)
+                fos.flush()
+                runCatching { fos.fd.sync() }
+            }
+            beforeSwap?.invoke()
+            verifyDiskMatchesExpected(targetFile, expectedBeforeExists, expectedBeforeSha256)
+            replaceFileAtomically(tempFile, targetFile)
+            swapped = true
+        } finally {
+            if (!swapped && tempFile.exists()) {
+                tempFile.delete()
+            }
+        }
+    }
+
+    internal suspend fun deleteFileChecked(
+        targetFile: File,
+        expectedSha256: String,
+        beforeDelete: (suspend () -> Unit)? = null
+    ) = withContext(Dispatchers.IO) {
+        beforeDelete?.invoke()
+        verifyDiskMatchesExpected(targetFile, expectedExists = true, expectedSha256 = expectedSha256)
+        if (!targetFile.delete() || targetFile.exists()) {
+            throw java.io.IOException("Impossibile eliminare '${targetFile.name}' durante il ripristino.")
+        }
+    }
+
+    internal fun diskMatchesState(targetFile: File, expectedExists: Boolean, expectedSha256: String?): Boolean {
+        return runCatching {
+            if (!expectedExists) {
+                !targetFile.exists()
+            } else {
+                targetFile.exists() &&
+                    targetFile.isFile &&
+                    sha256Hex(readBoundedBytes(targetFile, MAX_EDITABLE_FILE_BYTES)) == expectedSha256
+            }
+        }.getOrDefault(false)
+    }
+
+    private fun verifyDiskMatchesExpected(targetFile: File, expectedExists: Boolean, expectedSha256: String?) {
+        if (!expectedExists) {
+            if (targetFile.exists()) {
+                throw ConcurrentWorkspaceEditException(
+                    "Conflitto: '${targetFile.name}' è stato creato esternamente durante l'operazione."
+                )
+            }
+            return
+        }
+        if (!targetFile.exists() || !targetFile.isFile) {
+            throw ConcurrentWorkspaceEditException(
+                "Conflitto: '${targetFile.name}' è stato rimosso o sostituito esternamente."
+            )
+        }
+        val currentBytes = try {
+            readBoundedBytes(targetFile, MAX_EDITABLE_FILE_BYTES)
+        } catch (e: IllegalArgumentException) {
+            throw ConcurrentWorkspaceEditException(
+                "Conflitto: '${targetFile.name}' è stato modificato esternamente oltre il limite consentito."
+            )
+        }
+        if (sha256Hex(currentBytes) != expectedSha256) {
+            throw ConcurrentWorkspaceEditException(
+                "Conflitto: '${targetFile.name}' è stato modificato esternamente durante l'operazione."
+            )
+        }
+    }
+
+    private fun readBoundedBytes(file: File, maxBytes: Int): ByteArray {
+        val len = file.length()
+        if (len > maxBytes.toLong()) {
+            throw IllegalArgumentException(
+                "File '${file.name}' troppo grande ($len byte; limite $maxBytes byte)."
+            )
+        }
+        val out = java.io.ByteArrayOutputStream(len.toInt().coerceAtLeast(0))
+        val buf = ByteArray(8192)
+        file.inputStream().use { input ->
+            while (true) {
+                val n = input.read(buf)
+                if (n <= 0) break
+                if (out.size() + n > maxBytes) {
+                    throw IllegalArgumentException(
+                        "File '${file.name}' supera il limite massimo modificabile ($maxBytes byte)."
+                    )
+                }
+                out.write(buf, 0, n)
+            }
+        }
+        return out.toByteArray()
+    }
+
+    private fun replaceFileAtomically(tempFile: File, targetFile: File) {
+        if (targetFile.exists() && targetFile.isDirectory) {
+            throw java.io.IOException("Impossibile sovrascrivere la directory '${targetFile.name}'.")
+        }
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            try {
+                java.nio.file.Files.move(
+                    tempFile.toPath(),
+                    targetFile.toPath(),
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                    java.nio.file.StandardCopyOption.ATOMIC_MOVE
+                )
+                return
+            } catch (_: java.nio.file.AtomicMoveNotSupportedException) {
+                java.nio.file.Files.move(
+                    tempFile.toPath(),
+                    targetFile.toPath(),
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING
+                )
+                return
+            }
+        }
+        if (!tempFile.renameTo(targetFile)) {
+            throw java.io.IOException("Impossibile sostituire atomicamente '${targetFile.name}'.")
         }
     }
 
@@ -127,12 +350,18 @@ class WorkspaceManager(context: Context) {
         relativePath: String,
         content: String
     ): Result<String> = withContext(Dispatchers.IO) {
-        val file = resolveSafeFile(projectName, relativePath)
-            ?: return@withContext Result.failure(SecurityException("Percorso non valido: $relativePath"))
-        file.parentFile?.mkdirs()
-        val previous = if (file.exists()) file.readText(Charsets.UTF_8) else ""
-        file.writeText(content, Charsets.UTF_8)
-        Result.success(previous)
+        runCatching {
+            val newBytes = encodeStrictUtf8(content, MAX_EDITABLE_FILE_BYTES)
+            val state = inspectFileState(projectName, relativePath, MAX_EDITABLE_FILE_BYTES)
+            val previousText = if (state.exists) decodeStrictUtf8(state.bytes!!) else ""
+            writeBytesChecked(
+                targetFile = state.file,
+                newBytes = newBytes,
+                expectedBeforeExists = state.exists,
+                expectedBeforeSha256 = state.sha256
+            )
+            previousText
+        }
     }
 
     suspend fun patchFile(
@@ -141,18 +370,34 @@ class WorkspaceManager(context: Context) {
         oldText: String,
         newText: String
     ): Result<Pair<String, String>> = withContext(Dispatchers.IO) {
-        val file = resolveSafeFile(projectName, relativePath)
-            ?: return@withContext Result.failure(SecurityException("Percorso non valido: $relativePath"))
-        if (!file.exists()) {
-            return@withContext Result.failure(IllegalArgumentException("File inesistente: $relativePath"))
+        runCatching {
+            require(oldText.isNotEmpty()) { "Il testo target (oldText) non può essere vuoto." }
+            encodeStrictUtf8(oldText, MAX_EDITABLE_FILE_BYTES)
+            encodeStrictUtf8(newText, MAX_EDITABLE_FILE_BYTES)
+            val state = inspectFileState(projectName, relativePath, MAX_EDITABLE_FILE_BYTES)
+            if (!state.exists) {
+                throw IllegalArgumentException("File inesistente: $relativePath")
+            }
+            val previous = decodeStrictUtf8(state.bytes!!)
+            val firstIdx = previous.indexOf(oldText)
+            if (firstIdx < 0) {
+                throw IllegalStateException("Testo target non trovato in ${state.normalizedPath}")
+            }
+            if (previous.lastIndexOf(oldText) != firstIdx) {
+                throw IllegalStateException(
+                    "Testo target ambiguo in ${state.normalizedPath} (più occorrenze). Specifica più contesto."
+                )
+            }
+            val updated = previous.substring(0, firstIdx) + newText + previous.substring(firstIdx + oldText.length)
+            val newBytes = encodeStrictUtf8(updated, MAX_EDITABLE_FILE_BYTES)
+            writeBytesChecked(
+                targetFile = state.file,
+                newBytes = newBytes,
+                expectedBeforeExists = true,
+                expectedBeforeSha256 = state.sha256
+            )
+            previous to updated
         }
-        val previous = file.readText(Charsets.UTF_8)
-        if (!previous.contains(oldText)) {
-            return@withContext Result.failure(IllegalStateException("Testo target non trovato in $relativePath"))
-        }
-        val updated = previous.replaceFirst(oldText, newText)
-        file.writeText(updated, Charsets.UTF_8)
-        Result.success(previous to updated)
     }
 
     suspend fun deleteFile(projectName: String, relativePath: String): Boolean = withContext(Dispatchers.IO) {
@@ -171,7 +416,7 @@ class WorkspaceManager(context: Context) {
             .getOrElse { Regex(Regex.escape(pattern), RegexOption.IGNORE_CASE) }
         val matches = mutableListOf<CodeSearchMatch>()
         root.walkTopDown()
-            .filter { it.isFile && it.length() < 512_000 }
+            .filter { it.isFile && !it.name.startsWith(TEMP_FILE_PREFIX) && it.length() < 512_000 }
             .forEach { file ->
                 if (matches.size >= maxResults) return@forEach
                 val rel = file.relativeTo(root).path.replace(File.separatorChar, '/')
@@ -200,7 +445,7 @@ class WorkspaceManager(context: Context) {
             val root = projectDir(projectName)
             ZipOutputStream(outputStream).use { zos ->
                 root.walkTopDown()
-                    .filter { it.isFile }
+                    .filter { it.isFile && !it.name.startsWith(TEMP_FILE_PREFIX) }
                     .forEach { file ->
                         val rel = file.relativeTo(root).path.replace(File.separatorChar, '/')
                         zos.putNextEntry(ZipEntry("$projectName/$rel"))
@@ -240,13 +485,19 @@ class WorkspaceManager(context: Context) {
         return File(workspaceRoot, safe).apply { mkdirs() }
     }
 
-    private fun resolveSafeFile(projectName: String, relativePath: String): File? {
+    private fun resolveSafeFileInternal(projectName: String, relativePath: String): Pair<String, File>? {
         val root = projectDir(projectName).canonicalFile
-        val clean = relativePath.trim().removePrefix("/")
+        val clean = relativePath.trim().replace('\\', '/').removePrefix("/")
         if (clean.isBlank() || clean.contains("..")) return null
         val target = File(root, clean).canonicalFile
-        return if (target.path.startsWith(root.path + File.separator) || target == root) target else null
+        if (!target.path.startsWith(root.path + File.separator)) return null
+        val normalized = target.relativeTo(root).path.replace(File.separatorChar, '/')
+        if (normalized.isBlank()) return null
+        return normalized to target
     }
+
+    private fun resolveSafeFile(projectName: String, relativePath: String): File? =
+        resolveSafeFileInternal(projectName, relativePath)?.second
 
     private fun sanitizeSegment(raw: String): String =
         raw.trim().lowercase().replace(Regex("[^a-z0-9_-]"), "_").take(40)

@@ -148,11 +148,14 @@ interface SkillDao {
 
 @Dao
 interface WorkspaceSnapshotDao {
-    @Query("SELECT * FROM workspace_snapshots WHERE projectName = :projectName ORDER BY timestamp DESC LIMIT 50")
+    @Query("SELECT * FROM workspace_snapshots WHERE projectName = :projectName ORDER BY timestamp DESC, id DESC LIMIT 50")
     fun observeSnapshots(projectName: String): Flow<List<WorkspaceSnapshotEntity>>
 
-    @Query("SELECT * FROM workspace_snapshots WHERE projectName = :projectName AND relativePath = :relativePath ORDER BY timestamp DESC LIMIT 1")
+    @Query("SELECT * FROM workspace_snapshots WHERE projectName = :projectName AND relativePath = :relativePath ORDER BY timestamp DESC, id DESC LIMIT 1")
     suspend fun getLatestSnapshot(projectName: String, relativePath: String): WorkspaceSnapshotEntity?
+
+    @Query("SELECT * FROM workspace_snapshots WHERE projectName = :projectName ORDER BY timestamp DESC, id DESC LIMIT 1")
+    suspend fun getLatestProjectSnapshot(projectName: String): WorkspaceSnapshotEntity?
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertSnapshot(snapshot: WorkspaceSnapshotEntity): Long

@@ -89,8 +89,40 @@ data class WorkspaceSnapshotEntity(
     val previousContent: String,
     val newContent: String,
     val summary: String,
-    val timestamp: Long = System.currentTimeMillis()
-)
+    val timestamp: Long = System.currentTimeMillis(),
+    val previousExisted: Boolean? = null,
+    val previousBytes: ByteArray? = null,
+    val afterSha256: String? = null
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is WorkspaceSnapshotEntity) return false
+        return id == other.id &&
+            projectName == other.projectName &&
+            relativePath == other.relativePath &&
+            previousContent == other.previousContent &&
+            newContent == other.newContent &&
+            summary == other.summary &&
+            timestamp == other.timestamp &&
+            previousExisted == other.previousExisted &&
+            previousBytes.contentEquals(other.previousBytes) &&
+            afterSha256 == other.afterSha256
+    }
+
+    override fun hashCode(): Int {
+        var result = id.hashCode()
+        result = 31 * result + projectName.hashCode()
+        result = 31 * result + relativePath.hashCode()
+        result = 31 * result + previousContent.hashCode()
+        result = 31 * result + newContent.hashCode()
+        result = 31 * result + summary.hashCode()
+        result = 31 * result + timestamp.hashCode()
+        result = 31 * result + (previousExisted?.hashCode() ?: 0)
+        result = 31 * result + (previousBytes?.contentHashCode() ?: 0)
+        result = 31 * result + (afterSha256?.hashCode() ?: 0)
+        return result
+    }
+}
 
 @Entity(tableName = "automation_tasks")
 data class AutomationTaskEntity(
