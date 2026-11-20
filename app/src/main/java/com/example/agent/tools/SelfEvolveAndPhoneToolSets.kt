@@ -9,37 +9,48 @@ import com.google.ai.edge.litertlm.ToolParam
 import com.google.ai.edge.litertlm.ToolSet
 import org.json.JSONObject
 
-class SelfEvolveToolSet(
+class DataToolSet(
     private val repository: MobHarnRepository,
     private val sandbox: CodeSandboxRunner,
     private val monitor: ToolExecutionMonitor
 ) : ToolSet {
 
-    @Tool(description = "Crea o aggiorna un nuovo Custom Tool permanente in JavaScript ES6+ nell'harness. Il codice riceve la variabile globale INPUT (JSON parsato o stringa) e può usare console.log e return.")
+    @Tool(description = "Prova un esempio e propone di salvare un nuovo Custom Tool permanente in JavaScript ES6+ nell'harness. Il codice riceve la variabile globale INPUT (JSON parsato o stringa) e può usare console.log e return.")
     fun create_custom_tool(
         @ToolParam(description = "Nome univoco in snake_case (es. csv_parser, roi_calc)") name: String,
         @ToolParam(description = "Descrizione chiara di cosa fa il tool") description: String,
         @ToolParam(description = "Descrizione del formato di inputJson atteso") parametersDoc: String = "inputJson: JSON o stringa opzionale",
-        @ToolParam(description = "Corpo JavaScript ES6+ che usa INPUT e termina con return ...") jsCode: String
+        @ToolParam(description = "Corpo JavaScript ES6+ che usa INPUT e termina con return ...") jsCode: String,
+        @ToolParam(description = "Input di esempio in formato JSON") exampleInput: String,
+        @ToolParam(description = "Valore JSON atteso compatto, per esempio 42 oppure [1,2]") expectedJson: String
     ): String = monitor.executeTracked(
         toolName = "create_custom_tool",
         category = ToolGroup.SELF_EVOLVE.id,
         argsSummary = "$name: ${description.take(70)}",
         isExternalOrMutating = true,
-        approvalDescription = "Salvare il nuovo Custom Tool permanente '$name' in MobHarn?"
+        verifyBeforeSaving = {
+            when {
+                !Regex("[a-z][a-z0-9_]{0,39}").matches(name) -> "Nome tool non valido."
+                repository.getCustomToolByName(name) != null -> "Nome già registrato: riusa il tool, non sovrascriverlo."
+                jsCode.length !in 1..16000 || exampleInput.length !in 1..2000 || expectedJson.length !in 1..2000 -> "Fornisci codice e un esempio breve con risultato JSON atteso."
+                else -> {
+                    val wrapped = SelfEvolveToolSet.buildCustomToolWrapper(jsCode, exampleInput)
+                    val probe = "return JSON.stringify(JSON.parse(" + JSONObject.quote(exampleInput) + ")) !== undefined ? JSON.stringify((function(){" + wrapped + "})()) : undefined;"
+                    val result = sandbox.runJavaScript(probe)
+                    if (result.success && matchesExample(result.output, expectedJson)) null else "Test del tool fallito: risultato diverso dall'esempio o codice non eseguibile. Non salvato."
+                }
+            }
+        },
+        approvalDescription = "Test superato. Salvare '$name' (${description.take(100)})?"
     ) {
-        // Dry-run syntax verification inside the real JS sandbox before saving
-        val syntaxCheck = sandbox.runJavaScript("new Function('INPUT', ${JSONObject.quote(jsCode)}); return 'SYNTAX_OK';")
-        if (!syntaxCheck.success) {
-            return@executeTracked "Errore di sintassi JS nel custom tool '$name':\n${syntaxCheck.output}"
-        }
-        repository.upsertCustomTool(
+        val id = repository.upsertCustomTool(
             name = name,
             description = description,
             parametersDoc = parametersDoc,
             jsCode = jsCode,
-            createdByAgent = true
+            createdByAgent = true, insertOnly = true
         )
+        check(id != -1L) { "Nome già registrato. Nessuna sostituzione." }
         "Custom Tool '$name' verificato e registrato stabilmente nell'harness! Ora puoi eseguirlo con run_custom_tool."
     }
 
@@ -66,13 +77,27 @@ class SelfEvolveToolSet(
         val tool = repository.getCustomToolByName(name)
             ?: return@executeTracked "Custom Tool '$name' non trovato. Usa list_custom_tools per vedere quelli disponibili."
         if (!tool.enabled) return@executeTracked "Custom Tool '$name' è attualmente disabilitato."
-        val wrapped = buildCustomToolWrapper(tool.jsCode, inputJson)
+        val wrapped = SelfEvolveToolSet.buildCustomToolWrapper(tool.jsCode, inputJson)
         val res = sandbox.runJavaScript(wrapped)
         repository.incrementCustomToolUsage(tool.name)
         val status = if (res.success) "OK" else "ERRORE"
         "[CustomTool ${tool.name} • $status • ${res.durationMs}ms]\n${res.output}"
     }
 
+    companion object {
+        internal fun matchesExample(output: String, expected: String): Boolean {
+            if (!output.startsWith("=> ")) return false
+            // Compare canonical compact JSON, never the console log or a substring of it.
+            return output.removePrefix("=> ").trim() == expected.trim()
+        }
+    }
+}
+
+class SelfEvolveToolSet(
+    private val repository: MobHarnRepository,
+    private val sandbox: CodeSandboxRunner,
+    private val monitor: ToolExecutionMonitor
+) : ToolSet {
     @Tool(description = "Elimina un Custom Tool JS dall'harness per nome")
     fun delete_custom_tool(
         @ToolParam(description = "Nome del custom tool da eliminare") name: String
@@ -192,33 +217,37 @@ class PhoneUseToolSet(
 
     @Tool(description = "Esegue un tap su un elemento visibile sullo schermo cercandolo per testo o etichetta")
     fun tap_screen_text(
-        @ToolParam(description = "Testo o descrizione esatta/parziale del pulsante da toccare") targetText: String
-    ): String = monitor.executeTracked(
-        toolName = "tap_screen_text",
-        category = ToolGroup.PHONE_USE.id,
-        argsSummary = "tap \"$targetText\"",
-        isExternalOrMutating = true,
-        approvalDescription = "Toccare sullo schermo l'elemento '$targetText'?"
-    ) {
-        val svc = requireService()
-            ?: return@executeTracked accessRequired
-        svc.tapByText(targetText)
+        @ToolParam(description = "Testo o descrizione esatta del pulsante da toccare") targetText: String
+    ): String {
+        val source = requireService()
+        val target = source?.prepare("text", targetText)
+        return monitor.executeTracked(
+            toolName = "tap_screen_text",
+            category = ToolGroup.PHONE_USE.id,
+            argsSummary = "tap \"$targetText\"",
+            isExternalOrMutating = true,
+            approvalDescription = "Toccare sullo schermo l'elemento '$targetText'?"
+        ) {
+            checkNotNull(source) { accessRequired }.applyTarget(target)
+        }
     }
 
-    @Tool(description = "Esegue un tap fisico alle coordinate (x, y) in pixel sullo schermo")
+    @Tool(description = "Tocca il nodo accessibile al centro (x,y) riportato dalla lettura; nessun gesto su punti non identificati")
     fun tap_screen_coords(
         @ToolParam(description = "Coordinata X in pixel") x: Int,
         @ToolParam(description = "Coordinata Y in pixel") y: Int
-    ): String = monitor.executeTracked(
-        toolName = "tap_screen_coords",
-        category = ToolGroup.PHONE_USE.id,
-        argsSummary = "tap @($x, $y)",
-        isExternalOrMutating = true,
-        approvalDescription = "Toccare lo schermo alle coordinate ($x, $y)?"
-    ) {
-        val svc = requireService()
-            ?: return@executeTracked accessRequired
-        svc.tapCoordinates(x.toFloat(), y.toFloat())
+    ): String {
+        val source = requireService()
+        val target = source?.prepare("point", x = x, y = y)
+        return monitor.executeTracked(
+            toolName = "tap_screen_coords",
+            category = ToolGroup.PHONE_USE.id,
+            argsSummary = "tap @($x, $y)",
+            isExternalOrMutating = true,
+            approvalDescription = "Toccare lo schermo alle coordinate ($x, $y)?"
+        ) {
+            checkNotNull(source) { accessRequired }.applyTarget(target)
+        }
     }
 
     @Tool(description = "Scrive del testo nel campo di input attivo o corrispondente a fieldHint sullo schermo")
@@ -227,6 +256,8 @@ class PhoneUseToolSet(
         @ToolParam(description = "Testo da inserire") text: String
     ): String {
         val targetField = if (fieldHint.isNotBlank()) "'$fieldHint'" else "campo attivo"
+        val source = requireService()
+        val target = source?.prepare("input", fieldHint)
         return monitor.executeTracked(
             toolName = "type_screen_text",
             category = ToolGroup.PHONE_USE.id,
@@ -234,25 +265,25 @@ class PhoneUseToolSet(
             isExternalOrMutating = true,
             approvalDescription = "Scrivere '${text.take(60)}' nel $targetField sullo schermo?"
         ) {
-            val svc = requireService()
-                ?: return@executeTracked accessRequired
-            svc.typeText(fieldHint, text)
+            checkNotNull(source) { accessRequired }.applyTarget(target, text)
         }
     }
 
     @Tool(description = "Scorre lo schermo in una direzione: 'down', 'up', 'left' o 'right'")
     fun scroll_screen(
         @ToolParam(description = "Direzione: down, up, left o right") direction: String = "down"
-    ): String = monitor.executeTracked(
-        toolName = "scroll_screen",
-        category = ToolGroup.PHONE_USE.id,
-        argsSummary = "scroll $direction",
-        isExternalOrMutating = true,
-        approvalDescription = "Scorrere lo schermo verso '$direction'?"
-    ) {
-        val svc = requireService()
-            ?: return@executeTracked accessRequired
-        svc.scrollScreen(direction)
+    ): String {
+        val source = requireService()
+        val target = source?.prepare("scroll")
+        return monitor.executeTracked(
+            toolName = "scroll_screen",
+            category = ToolGroup.PHONE_USE.id,
+            argsSummary = "scroll $direction",
+            isExternalOrMutating = true,
+            approvalDescription = "Scorrere lo schermo verso '$direction'?"
+        ) {
+            checkNotNull(source) { accessRequired }.applyTarget(target, direction)
+        }
     }
 
     @Tool(description = "Esegue un'azione globale di navigazione Android: 'back', 'home', 'recents', 'notifications', 'quick_settings', 'screenshot'")

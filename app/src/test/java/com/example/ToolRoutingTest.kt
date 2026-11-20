@@ -17,7 +17,7 @@ class ToolRoutingTest {
         assertEquals(setOf("phone_use"), routeToolGroupsForPrompt(prompt, allEnabled, accessibilityConnected = true))
         assertFalse("phone_use" in routeToolGroupsForPrompt(prompt, allEnabled - "phone_use", accessibilityConnected = true))
         assertFalse("phone_use" in routeToolGroupsForPrompt(prompt, allEnabled, accessibilityConnected = false))
-        assertEquals(setOf("web_calc", "coding", "phone_use"), routeToolGroupsForPrompt("cerca il file", allEnabled, accessibilityConnected = true))
+        assertEquals(setOf("web_calc", "coding", "phone_use", "data_tools"), routeToolGroupsForPrompt("cerca il file", allEnabled, accessibilityConnected = true))
     }
 
     @Test

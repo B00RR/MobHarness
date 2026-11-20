@@ -319,11 +319,11 @@ class MobHarnRepository(
         description: String,
         parametersDoc: String,
         jsCode: String,
-        createdByAgent: Boolean = true
+        createdByAgent: Boolean = true,
+        insertOnly: Boolean = false
     ): Long {
         val cleanName = name.trim().lowercase().replace(Regex("[^a-z0-9_]"), "_").take(40)
-        return db.customToolDao().upsert(
-            CustomToolEntity(
+        val tool = CustomToolEntity(
                 name = cleanName,
                 description = description.trim(),
                 parametersDoc = parametersDoc.trim().ifBlank { "inputJson: JSON o stringa opzionale" },
@@ -332,7 +332,7 @@ class MobHarnRepository(
                 createdByAgent = createdByAgent,
                 updatedAt = System.currentTimeMillis()
             )
-        )
+        return if (insertOnly) db.customToolDao().insertIfAbsent(tool) else db.customToolDao().upsert(tool)
     }
 
     suspend fun incrementCustomToolUsage(name: String) = db.customToolDao().incrementUsage(name.trim().lowercase())

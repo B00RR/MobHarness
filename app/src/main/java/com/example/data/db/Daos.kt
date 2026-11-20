@@ -217,6 +217,9 @@ interface ToolLogDao {
 
 @Dao
 interface CustomToolDao {
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertIfAbsent(tool: CustomToolEntity): Long
+
     @Query("SELECT * FROM custom_tools ORDER BY enabled DESC, usageCount DESC, name ASC")
     fun observeCustomTools(): Flow<List<CustomToolEntity>>
 
