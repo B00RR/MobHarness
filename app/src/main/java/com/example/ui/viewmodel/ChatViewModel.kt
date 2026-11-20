@@ -17,6 +17,7 @@ import com.example.data.db.ChatMessageEntity
 import com.example.data.db.ChatSessionEntity
 import com.example.data.prefs.AppPreferences
 import com.example.data.prefs.ToolGroup
+import com.example.data.workspace.WorkspaceWritePolicy
 import com.example.di.MobHarnAppContainer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -294,10 +295,17 @@ class ChatViewModel(
             }
             val project = preferences.value.activeProjectName
             val fileName = if (ext == "html") "index.html" else "snippet_${System.currentTimeMillis() % 10000}.$ext"
-            val result = repo.workspace.writeFile(project, fileName, code)
-            result.onSuccess { prev ->
-                repo.recordSnapshot(project, fileName, prev, code, "Salvato dalla chat")
-                _events.tryEmit("Salvato in Studio → $project/$fileName")
+            val result = repo.writeWorkspaceFile(
+                projectName = project,
+                relativePath = fileName,
+                content = code,
+                summary = "Salvato dalla chat",
+                policy = WorkspaceWritePolicy.ExplicitUserSave
+            )
+            result.onSuccess { res ->
+                val msg = if (res.changed) "Salvato in Studio → $project/${res.normalizedPath}"
+                else "Nessuna modifica su $project/${res.normalizedPath}"
+                _events.tryEmit(msg)
             }.onFailure {
                 _events.tryEmit("Errore salvataggio: ${it.message}")
             }

@@ -6,6 +6,7 @@ import com.example.agent.sandbox.CodeSandboxRunner
 import com.example.data.MobHarnRepository
 import com.example.data.db.AutomationTaskEntity
 import com.example.data.prefs.ToolGroup
+import com.example.data.workspace.WorkspaceWritePolicy
 import com.google.ai.edge.litertlm.Tool
 import com.google.ai.edge.litertlm.ToolParam
 import com.google.ai.edge.litertlm.ToolProvider
@@ -53,25 +54,37 @@ class AgentApprovalCoordinator(
 
     suspend fun requestApproval(toolName: String, category: String, description: String,
         argumentsSummary: String, rememberKey: String? = null): Boolean = queue.withLock {
-        if (rememberKey != null && unlocked() && grants?.getBoolean(rememberKey, false) == true) return@withLock true
+        val effectiveRememberKey = rememberKey.takeUnless { toolName in NON_REMEMBERABLE_SCREEN_TOOLS }
+        if (effectiveRememberKey != null && unlocked() && grants?.getBoolean(effectiveRememberKey, false) == true) return@withLock true
         val result = CompletableDeferred<Choice>()
         synchronized(this) {
             deadline = System.nanoTime() + 120_000_000_000L
             response = result
             _pendingApproval.value = PendingToolApproval(toolName = toolName, category = category,
-                description = description, argumentsSummary = argumentsSummary, rememberKey = rememberKey)
+                description = description, argumentsSummary = argumentsSummary, rememberKey = effectiveRememberKey)
         }
         try {
             when (kotlinx.coroutines.withTimeoutOrNull(120_000L) { result.await() }) {
                 Choice.ONCE -> true
                 Choice.SAVE -> {
-                    grants?.edit()?.putBoolean(rememberKey, true)?.apply()
+                    if (effectiveRememberKey != null) {
+                        grants?.edit()?.putBoolean(effectiveRememberKey, true)?.apply()
+                    }
                     true
                 }
                 else -> false
             }
         }
         finally { synchronized(this) { response = null; _pendingApproval.value = null } }
+    }
+
+    companion object {
+        private val NON_REMEMBERABLE_SCREEN_TOOLS = setOf(
+            "tap_screen_text",
+            "tap_screen_coords",
+            "type_screen_text",
+            "scroll_screen"
+        )
     }
 
     @Synchronized fun resolve(id: String, approved: Boolean, remember: Boolean = false,
@@ -132,7 +145,7 @@ class ToolExecutionMonitor(
             val sameExact = turnCallSignatures.any { it == normSig }
             val sameToolCount = turnCallSignatures.count { it.first == normSig.first }
             when {
-                sameExact && toolName != "read_screen_ui" -> "Hai già eseguito $toolName con questi stessi parametri. NON richiamare altri tool: rispondi subito all'utente in italiano usando i dati già ottenuti."
+                sameExact && toolName !in setOf("read_screen_ui", "read_file_lines", "undo_workspace_file") -> "Hai già eseguito $toolName con questi stessi parametri. NON richiamare altri tool: rispondi subito all'utente in italiano usando i dati già ottenuti."
                 sameToolCount >= 2 && toolName == "web_search" -> "Hai già effettuato 2 ricerche web in questo turno. NON fare altre ricerche: rispondi ora all'utente in italiano con le informazioni raccolte."
                 turnCallSignatures.size >= (if (category == ToolGroup.PHONE_USE.id) 12 else 5) || turnAttemptCount >= (if (category == ToolGroup.PHONE_USE.id) 14 else 6) -> "Limite di chiamate tool per turno raggiunto. Rispondi subito all'utente in italiano con i risultati già ottenuti."
                 else -> {
@@ -206,7 +219,9 @@ class ToolExecutionMonitor(
                 status = if (ok) "success" else "error"
             )
         )
-        repository.logToolExecution(activeSessionId, toolName, category, argsSummary, result, elapsed, ok)
+        runCatching {
+            repository.logToolExecution(activeSessionId, toolName, category, argsSummary, result, elapsed, ok)
+        }
         result
     }
 
@@ -406,6 +421,9 @@ class CodingWorkspaceToolSet(
         else files.joinToString("\n") { "${it.relativePath} (${it.sizeBytes} B)" }
     }
 
+    private fun shortSig(text: String): String =
+        Integer.toHexString(text.hashCode()).padStart(8, '0').takeLast(6)
+
     @Tool(description = "Legge un intervallo di righe di un file del Coding Workspace con numeri di riga")
     fun read_file_lines(
         @ToolParam(description = "Percorso relativo del file (es. app.js o src/Main.kt)") relativePath: String,
@@ -416,11 +434,14 @@ class CodingWorkspaceToolSet(
         category = ToolGroup.CODING.id,
         argsSummary = "$relativePath [$startLine..$endLine]"
     ) {
-        repository.workspace.readFileLines(monitor.activeProjectName, relativePath, startLine, endLine)
-            .getOrElse { "Errore lettura: ${it.message}" }
+        repository.readWorkspaceFileLines(monitor.activeProjectName, relativePath, startLine, endLine)
+            .fold(
+                onSuccess = { it.formattedText },
+                onFailure = { "Errore lettura: ${it.message}" }
+            )
     }
 
-    @Tool(description = "Crea o sovrascrive un file nel Coding Workspace salvando automaticamente uno snapshot di rollback")
+    @Tool(description = "Crea un nuovo file o sovrascrive un file letto per intero nel Coding Workspace salvando prima uno snapshot reversibile")
     fun write_workspace_file(
         @ToolParam(description = "Percorso relativo del file") relativePath: String,
         @ToolParam(description = "Contenuto completo del file") content: String,
@@ -428,15 +449,24 @@ class CodingWorkspaceToolSet(
     ): String = monitor.executeTracked(
         toolName = "write_workspace_file",
         category = ToolGroup.CODING.id,
-        argsSummary = "$relativePath (${content.length} chars)"
+        argsSummary = "$relativePath (${content.length} chars #${shortSig(content)})"
     ) {
         val project = monitor.activeProjectName
-        val prev = repository.workspace.writeFile(project, relativePath, content).getOrThrow()
-        repository.recordSnapshot(project, relativePath, prev, content, summary)
-        "File '$relativePath' scritto nel progetto '$project' (${content.lines().size} righe). Snapshot salvato."
+        val res = repository.writeWorkspaceFile(
+            projectName = project,
+            relativePath = relativePath,
+            content = content,
+            summary = summary,
+            policy = WorkspaceWritePolicy.AgentGuarded
+        ).getOrThrow()
+        if (!res.changed) {
+            "File '${res.normalizedPath}' nel progetto '$project' invariato (nessuno snapshot aggiunto).\n${res.diff}"
+        } else {
+            "File '${res.normalizedPath}' scritto nel progetto '$project' (${res.lineCount} righe). Snapshot salvato.\n${res.diff}"
+        }
     }
 
-    @Tool(description = "Applica una patch chirurgica sostituendo un blocco di testo esatto in un file del workspace")
+    @Tool(description = "Applica una patch chirurgica sostituendo un blocco di testo esatto e univoco in un file del workspace salvando prima uno snapshot reversibile")
     fun patch_workspace_file(
         @ToolParam(description = "Percorso relativo del file") relativePath: String,
         @ToolParam(description = "Blocco di testo esatto da sostituire") oldText: String,
@@ -444,12 +474,39 @@ class CodingWorkspaceToolSet(
     ): String = monitor.executeTracked(
         toolName = "patch_workspace_file",
         category = ToolGroup.CODING.id,
-        argsSummary = "patch $relativePath"
+        argsSummary = "patch $relativePath (#${shortSig(oldText + "\u0000" + newText)})"
     ) {
         val project = monitor.activeProjectName
-        val (prev, updated) = repository.workspace.patchFile(project, relativePath, oldText, newText).getOrThrow()
-        repository.recordSnapshot(project, relativePath, prev, updated, "Patch su $relativePath")
-        "Patch applicata con successo a '$relativePath' (${updated.lines().size} righe)."
+        val res = repository.patchWorkspaceFile(
+            projectName = project,
+            relativePath = relativePath,
+            oldText = oldText,
+            newText = newText,
+            summary = "Patch su $relativePath"
+        ).getOrThrow()
+        if (!res.changed) {
+            "Patch su '${res.normalizedPath}' senza modifiche effettive.\n${res.diff}"
+        } else {
+            "Patch applicata a '${res.normalizedPath}' (${res.lineCount} righe). Snapshot salvato.\n${res.diff}"
+        }
+    }
+
+    @Tool(description = "Annulla l'ultima modifica salvata di un file (o dell'ultimo file modificato) nel Coding Workspace ripristinando lo snapshot precedente")
+    fun undo_workspace_file(
+        @ToolParam(description = "Percorso relativo del file da ripristinare (opzionale: se vuoto annulla l'ultima modifica del progetto)") relativePath: String = ""
+    ): String = monitor.executeTracked(
+        toolName = "undo_workspace_file",
+        category = ToolGroup.CODING.id,
+        argsSummary = if (relativePath.isBlank()) "undo latest (${monitor.activeProjectName})" else "undo $relativePath"
+    ) {
+        val project = monitor.activeProjectName
+        val res = repository.undoLatestWorkspaceChange(project, relativePath).getOrThrow()
+        val headline = if (res.existsAfter) {
+            "Ripristinato '${res.normalizedPath}' nel progetto '$project' (${res.lineCount} righe)."
+        } else {
+            "Rimosso '${res.normalizedPath}' nel progetto '$project' (il file non esisteva prima della modifica)."
+        }
+        "$headline\n${res.diff}"
     }
 
     @Tool(description = "Cerca codice tramite testo o regex in tutti i file del progetto attivo")
@@ -829,7 +886,7 @@ class MobHarnToolkitRegistry(
             return if (raw == null || raw == JSONObject.NULL) null else raw
         }
 
-        fun str(vararg keys: String, default: String = ""): String {
+        fun str(vararg keys: String, default: String = "", allowSingleArgFallback: Boolean = true): String {
             for (k in keys) {
                 val direct = lookup(k)
                 if (direct != null) {
@@ -837,12 +894,20 @@ class MobHarnToolkitRegistry(
                     if (s.isNotEmpty() && !s.equals("null", ignoreCase = true)) return s
                 }
             }
-            if (args.size == 1 && keys.isNotEmpty()) {
+            if (allowSingleArgFallback && args.size == 1 && keys.isNotEmpty()) {
                 val rawSingle = args.values.firstOrNull()
                 if (rawSingle != null && rawSingle != JSONObject.NULL) {
                     val single = rawSingle.toString().trim()
                     if (single.isNotEmpty() && !single.equals("null", ignoreCase = true)) return single
                 }
+            }
+            return default
+        }
+
+        fun rawStr(vararg keys: String, default: String = ""): String {
+            for (k in keys) {
+                val direct = lookup(k)
+                if (direct != null) return direct.toString()
             }
             return default
         }
@@ -1011,17 +1076,26 @@ class MobHarnToolkitRegistry(
                 )
             }
             "write_workspace_file", "write_file" -> gated("coding") {
-                codingTools.write_workspace_file(
-                    relativePath = str("relativePath", "relative_path", "path", "file"),
-                    content = str("content", "code", "text"),
+                val path = str("relativePath", "relative_path", "path", "file")
+                if (path.isBlank()) "Errore write_workspace_file: parametro 'relativePath' mancante."
+                else codingTools.write_workspace_file(
+                    relativePath = path,
+                    content = rawStr("content", "code", "text"),
                     summary = str("summary", default = "Aggiornato da Gemma 4")
                 )
             }
             "patch_workspace_file", "patch_file" -> gated("coding") {
-                codingTools.patch_workspace_file(
-                    relativePath = str("relativePath", "relative_path", "path", "file"),
-                    oldText = str("oldText", "old_text", "search"),
-                    newText = str("newText", "new_text", "replace")
+                val path = str("relativePath", "relative_path", "path", "file")
+                if (path.isBlank()) "Errore patch_workspace_file: parametro 'relativePath' mancante."
+                else codingTools.patch_workspace_file(
+                    relativePath = path,
+                    oldText = rawStr("oldText", "old_text", "search"),
+                    newText = rawStr("newText", "new_text", "replace")
+                )
+            }
+            "undo_workspace_file", "undo_workspace_change", "rollback_workspace_file", "undo_file", "revert_file" -> gated("coding") {
+                codingTools.undo_workspace_file(
+                    relativePath = str("relativePath", "relative_path", "path", "file", default = "")
                 )
             }
             "search_code", "grep_workspace" -> gated("coding") {
@@ -1100,22 +1174,30 @@ class MobHarnToolkitRegistry(
                 phoneUseTools.read_screen_ui(intArg("maxNodes", "max_nodes", default = 80))
             }
             "tap_screen_text", "tap_element" -> gated("phone_use") {
-                phoneUseTools.tap_screen_text(str("targetText", "target_text", "text", "label"))
+                phoneUseTools.tap_screen_text(
+                    targetText = str("targetText", "target_text", "text", "label", allowSingleArgFallback = false),
+                    contextHint = str("contextHint", "context_hint", "context", "container", allowSingleArgFallback = false)
+                )
             }
             "tap_screen_coords", "tap_coordinates" -> gated("phone_use") {
                 phoneUseTools.tap_screen_coords(
-                    x = intArg("x", default = 0),
-                    y = intArg("y", default = 0)
+                    x = intArg("x", default = -1),
+                    y = intArg("y", default = -1)
                 )
             }
             "type_screen_text", "type_text" -> gated("phone_use") {
+                if (args["text"] !is String && args["value"] !is String) return@gated "Argomento text mancante. Nessuna azione."
                 phoneUseTools.type_screen_text(
-                    fieldHint = str("fieldHint", "field_hint", "hint"),
-                    text = str("text", "value")
+                    fieldHint = str("fieldHint", "field_hint", "hint", allowSingleArgFallback = false),
+                    text = str("text", "value", allowSingleArgFallback = false),
+                    contextHint = str("contextHint", "context_hint", "context", "container", allowSingleArgFallback = false)
                 )
             }
             "scroll_screen" -> gated("phone_use") {
-                phoneUseTools.scroll_screen(str("direction", default = "down"))
+                phoneUseTools.scroll_screen(
+                    direction = str("direction", default = "down"),
+                    containerHint = str("containerHint", "container_hint", "contextHint", "context_hint", "container", allowSingleArgFallback = false)
+                )
             }
             "phone_global_action", "system_navigate" -> gated("phone_use") {
                 phoneUseTools.phone_global_action(str("action", "command", default = "home"))
@@ -1197,8 +1279,8 @@ fun routeToolGroupsForPrompt(userPrompt: String, enabledGroups: Set<String>, acc
     // 2. Coding Workspace & Sandbox
     if (p.containsAny(
             "codice", "code", "file", "workspace", "progetto", "studio", "script", "javascript",
-            "js", "sql", "sqlite", "html", "css", "kotlin", "python", "patch", "bug",
-            "funzione", "sandbox", "esegui", "compila", "testa", "index.html", "app.js"
+            "js", "sql", "sqlite", "html", "css", "kotlin", "python", "patch", "bug", "diff",
+            "rollback", "undo", "funzione", "sandbox", "esegui", "compila", "testa", "index.html", "app.js"
         )
     ) {
         addIfEnabled(ToolGroup.CODING)

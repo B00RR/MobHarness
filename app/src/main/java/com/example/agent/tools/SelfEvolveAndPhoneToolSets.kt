@@ -214,20 +214,34 @@ class PhoneUseToolSet(
         svc.captureScreenTree(maxNodes.coerceIn(10, 150))
     }
 
-    @Tool(description = "Esegue un tap su un elemento visibile sullo schermo cercandolo per testo o etichetta")
+    @Tool(description = "Esegue un tap su un elemento visibile sullo schermo cercandolo per testo o etichetta; opzionalmente usa contextHint per disambiguare voci duplicate")
     fun tap_screen_text(
-        @ToolParam(description = "Testo o descrizione esatta del pulsante da toccare") targetText: String
+        @ToolParam(description = "Testo o descrizione esatta dell'elemento da toccare") targetText: String,
+        @ToolParam(description = "Etichetta opzionale della riga/sezione per disambiguare elementi duplicati") contextHint: String = ""
     ): String {
         val source = requireService()
-        val target = source?.prepare("text", targetText)
+        val resolution = source?.prepareTarget("text", query = targetText, contextHint = contextHint)
+        val target = (resolution as? MobHarnAccessibilityService.TargetResolution.Unique)?.target
+        val summary = if (contextHint.isNotBlank()) "tap \"$targetText\" in \"$contextHint\"" else "tap \"$targetText\""
+        val promptDesc = if (contextHint.isNotBlank()) {
+            "Toccare sullo schermo l'elemento '$targetText' in '$contextHint'?"
+        } else {
+            "Toccare sullo schermo l'elemento '$targetText'?"
+        }
         return monitor.executeTracked(
             toolName = "tap_screen_text",
             category = ToolGroup.PHONE_USE.id,
-            argsSummary = "tap \"$targetText\"",
-            isExternalOrMutating = true,
-            approvalDescription = "Toccare sullo schermo l'elemento '$targetText'?"
+            argsSummary = summary,
+            isExternalOrMutating = target != null,
+            exactCommand = null,
+            approvalDescription = promptDesc
         ) {
-            checkNotNull(source) { accessRequired }.applyTarget(target)
+            val svc = checkNotNull(source) { accessRequired }
+            when (resolution) {
+                is MobHarnAccessibilityService.TargetResolution.Unique -> svc.applyTarget(resolution.target)
+                is MobHarnAccessibilityService.TargetResolution.Invalid -> error(resolution.reason)
+                null -> error(accessRequired)
+            }
         }
     }
 
@@ -237,51 +251,81 @@ class PhoneUseToolSet(
         @ToolParam(description = "Coordinata Y in pixel") y: Int
     ): String {
         val source = requireService()
-        val target = source?.prepare("point", x = x, y = y)
+        val resolution = source?.prepareTarget("point", x = x, y = y)
+        val target = (resolution as? MobHarnAccessibilityService.TargetResolution.Unique)?.target
         return monitor.executeTracked(
             toolName = "tap_screen_coords",
             category = ToolGroup.PHONE_USE.id,
             argsSummary = "tap @($x, $y)",
             isExternalOrMutating = target != null, // A missing target only reports an error; never request a blind tap.
+            exactCommand = null,
             approvalDescription = "Toccare lo schermo alle coordinate ($x, $y)?"
         ) {
-            checkNotNull(source) { accessRequired }.applyTarget(target)
+            val svc = checkNotNull(source) { accessRequired }
+            when (resolution) {
+                is MobHarnAccessibilityService.TargetResolution.Unique -> svc.applyTarget(resolution.target)
+                is MobHarnAccessibilityService.TargetResolution.Invalid -> error(resolution.reason)
+                null -> error(accessRequired)
+            }
         }
     }
 
-    @Tool(description = "Scrive del testo nel campo di input attivo o corrispondente a fieldHint sullo schermo")
+    @Tool(description = "Scrive del testo nel campo di input attivo o corrispondente a fieldHint sullo schermo; risolve sempre un bersaglio univoco prima di chiedere conferma")
     fun type_screen_text(
         @ToolParam(description = "Suggerimento/etichetta del campo (o vuoto per campo attivo)") fieldHint: String = "",
-        @ToolParam(description = "Testo da inserire") text: String
+        @ToolParam(description = "Testo da inserire") text: String,
+        @ToolParam(description = "Contesto opzionale della riga/sezione per disambiguare campi simili") contextHint: String = ""
     ): String {
         val targetField = if (fieldHint.isNotBlank()) "'$fieldHint'" else "campo attivo"
         val source = requireService()
-        val target = source?.prepare("input", fieldHint)
+        val resolution = source?.prepareTarget("input", query = fieldHint, contextHint = contextHint)
+        val target = (resolution as? MobHarnAccessibilityService.TargetResolution.Unique)?.target
+        val safeSummary = when {
+            fieldHint.isNotBlank() && contextHint.isNotBlank() -> "type in '$fieldHint' ($contextHint)"
+            fieldHint.isNotBlank() -> "type in '$fieldHint'"
+            contextHint.isNotBlank() -> "type in active field ($contextHint)"
+            else -> "type in active field"
+        }
         return monitor.executeTracked(
             toolName = "type_screen_text",
             category = ToolGroup.PHONE_USE.id,
-            argsSummary = if (fieldHint.isNotBlank()) "type in '$fieldHint'" else "type in active field",
-            isExternalOrMutating = true,
+            argsSummary = safeSummary,
+            isExternalOrMutating = target != null,
+            exactCommand = null,
             approvalDescription = "Scrivere '${text.take(60)}' nel $targetField sullo schermo?"
         ) {
-            checkNotNull(source) { accessRequired }.applyTarget(target, text)
+            val svc = checkNotNull(source) { accessRequired }
+            when (resolution) {
+                is MobHarnAccessibilityService.TargetResolution.Unique -> svc.applyTarget(resolution.target, text)
+                is MobHarnAccessibilityService.TargetResolution.Invalid -> error(resolution.reason)
+                null -> error(accessRequired)
+            }
         }
     }
 
-    @Tool(description = "Scorre lo schermo in una direzione: 'down', 'up', 'left' o 'right'")
+    @Tool(description = "Scorre lo schermo in una direzione: 'down', 'up', 'left' o 'right'; usa containerHint se sono presenti più aree scorrevoli")
     fun scroll_screen(
-        @ToolParam(description = "Direzione: down, up, left o right") direction: String = "down"
+        @ToolParam(description = "Direzione: down, up, left o right") direction: String = "down",
+        @ToolParam(description = "Etichetta opzionale del contenitore scorrevole da muovere") containerHint: String = ""
     ): String {
         val source = requireService()
-        val target = source?.prepare("scroll")
+        val resolution = source?.prepareTarget("scroll", contextHint = containerHint, actionValue = direction)
+        val target = (resolution as? MobHarnAccessibilityService.TargetResolution.Unique)?.target
+        val summary = if (containerHint.isNotBlank()) "scroll $direction ($containerHint)" else "scroll $direction"
         return monitor.executeTracked(
             toolName = "scroll_screen",
             category = ToolGroup.PHONE_USE.id,
-            argsSummary = "scroll $direction",
-            isExternalOrMutating = true,
+            argsSummary = summary,
+            isExternalOrMutating = target != null,
+            exactCommand = null,
             approvalDescription = "Scorrere lo schermo verso '$direction'?"
         ) {
-            checkNotNull(source) { accessRequired }.applyTarget(target, direction)
+            val svc = checkNotNull(source) { accessRequired }
+            when (resolution) {
+                is MobHarnAccessibilityService.TargetResolution.Unique -> svc.applyTarget(resolution.target, direction)
+                is MobHarnAccessibilityService.TargetResolution.Invalid -> error(resolution.reason)
+                null -> error(accessRequired)
+            }
         }
     }
 

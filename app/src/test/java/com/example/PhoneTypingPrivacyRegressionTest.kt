@@ -1,6 +1,9 @@
 package com.example
 
 import android.content.Context
+import android.graphics.Rect
+import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.agent.phoneuse.MobHarnAccessibilityService
@@ -21,11 +24,14 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
@@ -54,12 +60,58 @@ class PhoneTypingPrivacyRegressionTest {
         phoneUse = PhoneUseToolSet(monitor)
     }
 
+    private fun attachObservedInputScreen(fieldHint: String?, focused: Boolean = false): MobHarnAccessibilityService {
+        val svc = Robolectric.buildService(MobHarnAccessibilityService::class.java).create().get()
+        val root = AccessibilityNodeInfo.obtain().apply {
+            packageName = "org.fixture.editor"
+            className = "android.widget.LinearLayout"
+            setBoundsInScreen(Rect(0, 0, 1080, 1920))
+            isEnabled = true
+            isVisibleToUser = true
+        }
+        val input = AccessibilityNodeInfo.obtain().apply {
+            packageName = "org.fixture.editor"
+            className = "android.widget.EditText"
+            if (!fieldHint.isNullOrBlank()) hintText = fieldHint
+            setBoundsInScreen(Rect(40, 200, 1000, 340))
+            isEditable = true
+            isFocused = focused
+            isEnabled = true
+            isVisibleToUser = true
+        }
+        shadowOf(root).addChild(input)
+        svc.testRootProvider = { root }
+        svc.testWindowTypeProvider = { AccessibilityWindowInfo.TYPE_APPLICATION }
+        svc.testDeviceLockedProvider = { false }
+        svc.testActionPerformer = { _, _, _ -> true }
+        svc.testPause = { }
+        MobHarnAccessibilityService.setTestInstance(svc)
+        svc.captureScreenTree()
+        return svc
+    }
+
     @Test fun coordinatesWithoutATargetFailWithoutPrompting() = runBlocking {
         val traces = mutableListOf<ToolCallTrace>()
         monitor.onLiveTraceUpdate = { traces.add(it) }
         phoneUse.tap_screen_coords(4, 27)
         assertEquals("error", traces.last().status)
         assertEquals(null, approvalCoordinator.pendingApproval.value)
+    }
+
+    @Test fun typingWithoutObservedUniqueTargetFailsWithoutPromptingOrLeakingSecret() = runBlocking {
+        val secret = "HARMLESS_NO_TARGET_SECRET_42"
+        val traces = mutableListOf<ToolCallTrace>()
+        monitor.onLiveTraceUpdate = { traces.add(it) }
+
+        val out = phoneUse.type_screen_text(fieldHint = "Notes", text = secret)
+
+        assertEquals("error", traces.last().status)
+        assertNull(approvalCoordinator.pendingApproval.value)
+        assertFalse(out.contains(secret))
+        traces.forEach {
+            assertFalse(it.argumentsSummary.contains(secret))
+            assertFalse(it.resultSummary.contains(secret))
+        }
     }
 
     @After
@@ -70,6 +122,7 @@ class PhoneTypingPrivacyRegressionTest {
 
     @Test
     fun `type_screen_text refusal keeps marker in transient approval but excludes from saved history and traces`() = runBlocking {
+        attachObservedInputScreen("Notes")
         val harmlessMarker = "HARMLESS_SECRET_REFUSAL_xyz987"
         val traces = mutableListOf<ToolCallTrace>()
         monitor.onLiveTraceUpdate = { traces.add(it) }
@@ -98,7 +151,7 @@ class PhoneTypingPrivacyRegressionTest {
         assertEquals("type in 'Notes'", pending.argumentsSummary)
 
         // User refuses
-        approvalCoordinator.resolve(pending!!.id, false)
+        approvalCoordinator.resolve(pending.id, false)
 
         val result = deferredResult.await()
         assertEquals("Azione rifiutata dall'utente.", result)
@@ -135,6 +188,7 @@ class PhoneTypingPrivacyRegressionTest {
 
     @Test
     fun `type_screen_text approval executes but excludes marker from saved traces and history`() = runBlocking {
+        attachObservedInputScreen("Subject")
         val harmlessMarker = "HARMLESS_SECRET_APPROVAL_abc123"
         val traces = mutableListOf<ToolCallTrace>()
         monitor.onLiveTraceUpdate = { traces.add(it) }
@@ -154,7 +208,7 @@ class PhoneTypingPrivacyRegressionTest {
         assertEquals("type in 'Subject'", pending.argumentsSummary)
 
         // User approves
-        approvalCoordinator.resolve(pending!!.id, true)
+        approvalCoordinator.resolve(pending.id, true)
 
         val result = deferredResult.await()
         assertFalse(
@@ -189,6 +243,7 @@ class PhoneTypingPrivacyRegressionTest {
 
     @Test
     fun `type_screen_text with empty fieldHint stores action and active field without value`() = runBlocking {
+        attachObservedInputScreen(fieldHint = null, focused = true)
         val harmlessMarker = "HARMLESS_ACTIVE_FIELD_999"
         val deferredResult = async(Dispatchers.Default) {
             phoneUse.type_screen_text(fieldHint = "", text = harmlessMarker)
@@ -203,7 +258,7 @@ class PhoneTypingPrivacyRegressionTest {
         assertEquals("type in active field", pending!!.argumentsSummary)
         assertFalse(pending.argumentsSummary.contains(harmlessMarker))
 
-        approvalCoordinator.resolve(pending!!.id, false)
+        approvalCoordinator.resolve(pending.id, false)
         deferredResult.await()
 
         val logs = repository.toolLogsFlow.first()

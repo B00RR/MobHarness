@@ -19,16 +19,30 @@ import com.example.data.prefs.PreferencesRepository
 import com.example.data.vault.MarkdownVaultManager
 import com.example.data.vault.SessionCheckpoint
 import com.example.data.vault.VaultDocuments
+import com.example.data.workspace.ConcurrentWorkspaceEditException
+import com.example.data.workspace.MAX_EDITABLE_FILE_BYTES
+import com.example.data.workspace.WorkspaceEditorDocument
 import com.example.data.workspace.WorkspaceManager
+import com.example.data.workspace.WorkspaceMutationResult
+import com.example.data.workspace.WorkspaceReadExcerpt
+import com.example.data.workspace.WorkspaceWritePolicy
+import com.example.data.workspace.buildBoundedUnifiedDiff
+import com.example.data.workspace.countTextLines
+import com.example.data.workspace.decodeStrictUtf8
+import com.example.data.workspace.encodeStrictUtf8
+import com.example.data.workspace.sha256Hex
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 class MobHarnRepository(
     private val context: Context,
@@ -259,35 +273,499 @@ class MobHarnRepository(
         vault.removeSkillCopy(skill.slug)
     }
 
-    // --- Workspace Snapshots ---
+    // --- Workspace Snapshots & Reversible Operations ---
+    private data class ObservedReadState(
+        val sha256: String?,
+        val sizeBytes: Long,
+        val isPartial: Boolean
+    )
+
+    private val workspaceMutex = Mutex()
+    private val observedAgentReads = ConcurrentHashMap<Pair<String, String>, ObservedReadState>()
+
+    @Volatile internal var beforeFileWriteSwapForTest: (suspend (project: String, path: String, snapshotId: Long) -> Unit)? = null
+    @Volatile internal var beforeUndoRestoreForTest: (suspend (project: String, path: String, snapshotId: Long) -> Unit)? = null
+
     fun observeSnapshots(projectName: String): Flow<List<WorkspaceSnapshotEntity>> =
         db.workspaceSnapshotDao().observeSnapshots(projectName)
+
+    suspend fun readWorkspaceFileLines(
+        projectName: String,
+        relativePath: String,
+        startLine: Int = 1,
+        endLine: Int = 200
+    ): Result<WorkspaceReadExcerpt> = workspace.readFileLinesWithMeta(projectName, relativePath, startLine, endLine)
+        .onSuccess { excerpt ->
+            val key = projectName to excerpt.normalizedPath
+            val prev = observedAgentReads[key]
+            val keepFull = prev != null &&
+                !prev.isPartial &&
+                prev.sha256 != null &&
+                prev.sha256 == excerpt.sha256
+            observedAgentReads[key] = ObservedReadState(
+                sha256 = excerpt.sha256,
+                sizeBytes = excerpt.sizeBytes,
+                isPartial = if (keepFull) false else excerpt.isPartial
+            )
+        }
+
+    suspend fun openWorkspaceFileForEditor(
+        projectName: String,
+        relativePath: String
+    ): Result<WorkspaceEditorDocument> = withContext(Dispatchers.IO) {
+        runCatching {
+            val state = try {
+                workspace.inspectFileState(projectName, relativePath, MAX_EDITABLE_FILE_BYTES)
+            } catch (e: IllegalArgumentException) {
+                val norm = workspace.normalizeRelativePath(projectName, relativePath) ?: relativePath
+                return@runCatching WorkspaceEditorDocument(
+                    normalizedPath = norm,
+                    content = "",
+                    existed = true,
+                    sha256 = null,
+                    editable = false,
+                    notice = e.message ?: "File non modificabile nell'editor."
+                )
+            }
+            if (!state.exists) {
+                WorkspaceEditorDocument(
+                    normalizedPath = state.normalizedPath,
+                    content = "",
+                    existed = false,
+                    sha256 = null,
+                    editable = true
+                )
+            } else {
+                try {
+                    val text = decodeStrictUtf8(state.bytes!!)
+                    WorkspaceEditorDocument(
+                        normalizedPath = state.normalizedPath,
+                        content = text,
+                        existed = true,
+                        sha256 = state.sha256,
+                        editable = true
+                    )
+                } catch (e: IllegalArgumentException) {
+                    WorkspaceEditorDocument(
+                        normalizedPath = state.normalizedPath,
+                        content = "",
+                        existed = true,
+                        sha256 = null,
+                        editable = false,
+                        notice = e.message ?: "File non UTF-8 valido."
+                    )
+                }
+            }
+        }
+    }
+
+    suspend fun writeWorkspaceFile(
+        projectName: String,
+        relativePath: String,
+        content: String,
+        summary: String = "Aggiornamento file",
+        policy: WorkspaceWritePolicy = WorkspaceWritePolicy.AgentGuarded
+    ): Result<WorkspaceMutationResult> = withContext(Dispatchers.IO) {
+        workspaceMutex.withLock {
+            runCatching {
+                val newBytes = encodeStrictUtf8(content, MAX_EDITABLE_FILE_BYTES)
+                val newSha = sha256Hex(newBytes)
+                val before = workspace.inspectFileState(projectName, relativePath, MAX_EDITABLE_FILE_BYTES)
+                val beforeText = if (before.exists) decodeStrictUtf8(before.bytes!!) else ""
+                val readKey = projectName to before.normalizedPath
+
+                when (policy) {
+                    WorkspaceWritePolicy.RequireAbsent -> {
+                        if (before.exists) {
+                            throw ConcurrentWorkspaceEditException(
+                                "Il file '${before.normalizedPath}' esiste già nel progetto '$projectName'."
+                            )
+                        }
+                    }
+                    is WorkspaceWritePolicy.MatchExpectedBase -> {
+                        if (!policy.loadedInFull) {
+                            throw IllegalStateException(
+                                "Lettura parziale o file non modificabile: impossibile sovrascrivere '${before.normalizedPath}'."
+                            )
+                        }
+                        if (policy.expectedBaseSha256 == null) {
+                            if (before.exists) {
+                                throw ConcurrentWorkspaceEditException(
+                                    "Conflitto: '${before.normalizedPath}' è stato creato esternamente dopo l'apertura."
+                                )
+                            }
+                        } else if (!before.exists || before.sha256 != policy.expectedBaseSha256) {
+                            throw ConcurrentWorkspaceEditException(
+                                "Conflitto: '${before.normalizedPath}' è stato modificato esternamente dopo il caricamento. Ricarica il file prima di salvare."
+                            )
+                        }
+                    }
+                    WorkspaceWritePolicy.AgentGuarded -> {
+                        if (before.exists) {
+                            val obs = observedAgentReads[readKey]
+                                ?: throw IllegalStateException(
+                                    "Leggi prima l'intero file '${before.normalizedPath}' con read_file_lines oppure usa patch_workspace_file per una modifica mirata."
+                                )
+                            if (obs.isPartial) {
+                                throw IllegalStateException(
+                                    "Lettura parziale su '${before.normalizedPath}': impossibile eseguire una sovrascrittura completa distruttiva. Usa patch_workspace_file oppure leggi l'intero file."
+                                )
+                            }
+                            if (obs.sha256 == null || obs.sha256 != before.sha256) {
+                                throw ConcurrentWorkspaceEditException(
+                                    "Conflitto: '${before.normalizedPath}' è stato modificato esternamente dopo l'ultima lettura. Rileggilo prima di scrivere."
+                                )
+                            }
+                        }
+                    }
+                    WorkspaceWritePolicy.ExplicitUserSave -> Unit
+                }
+
+                if (before.exists && before.sha256 == newSha) {
+                    if (policy is WorkspaceWritePolicy.AgentGuarded) {
+                        observedAgentReads[readKey] = ObservedReadState(
+                            sha256 = newSha,
+                            sizeBytes = newBytes.size.toLong(),
+                            isPartial = false
+                        )
+                    }
+                    return@runCatching WorkspaceMutationResult(
+                        projectName = projectName,
+                        normalizedPath = before.normalizedPath,
+                        snapshotId = null,
+                        changed = false,
+                        existedBefore = true,
+                        existsAfter = true,
+                        newSha256 = newSha,
+                        lineCount = countTextLines(content),
+                        diff = "Nessuna modifica (file invariato)."
+                    )
+                }
+
+                val diff = buildBoundedUnifiedDiff(
+                    relativePath = before.normalizedPath,
+                    beforeExists = before.exists,
+                    beforeBytes = before.bytes,
+                    afterExists = true,
+                    afterBytes = newBytes
+                )
+
+                // Persist reversible checkpoint BEFORE touching the target file on disk.
+                val snapshotId = db.workspaceSnapshotDao().insertSnapshot(
+                    WorkspaceSnapshotEntity(
+                        projectName = projectName,
+                        relativePath = before.normalizedPath,
+                        previousContent = beforeText,
+                        newContent = content,
+                        summary = summary,
+                        timestamp = System.currentTimeMillis(),
+                        previousExisted = before.exists,
+                        previousBytes = if (before.exists) before.bytes else null,
+                        afterSha256 = newSha
+                    )
+                )
+
+                try {
+                    workspace.writeBytesChecked(
+                        targetFile = before.file,
+                        newBytes = newBytes,
+                        expectedBeforeExists = before.exists,
+                        expectedBeforeSha256 = before.sha256,
+                        beforeSwap = beforeFileWriteSwapForTest?.let { hook ->
+                            { hook(projectName, before.normalizedPath, snapshotId) }
+                        }
+                    )
+                } catch (e: Throwable) {
+                    // Clean up the uncommitted checkpoint only if we verify the disk file is untouched.
+                    if (workspace.diskMatchesState(before.file, before.exists, before.sha256)) {
+                        runCatching { db.workspaceSnapshotDao().deleteSnapshot(snapshotId) }
+                    }
+                    throw e
+                }
+
+                if (policy is WorkspaceWritePolicy.AgentGuarded) {
+                    observedAgentReads[readKey] = ObservedReadState(
+                        sha256 = newSha,
+                        sizeBytes = newBytes.size.toLong(),
+                        isPartial = false
+                    )
+                }
+
+                WorkspaceMutationResult(
+                    projectName = projectName,
+                    normalizedPath = before.normalizedPath,
+                    snapshotId = snapshotId,
+                    changed = true,
+                    existedBefore = before.exists,
+                    existsAfter = true,
+                    newSha256 = newSha,
+                    lineCount = countTextLines(content),
+                    diff = diff
+                )
+            }
+        }
+    }
+
+    suspend fun patchWorkspaceFile(
+        projectName: String,
+        relativePath: String,
+        oldText: String,
+        newText: String,
+        summary: String? = null
+    ): Result<WorkspaceMutationResult> = withContext(Dispatchers.IO) {
+        workspaceMutex.withLock {
+            runCatching {
+                require(oldText.isNotEmpty()) { "Il testo target (oldText) non può essere vuoto." }
+                encodeStrictUtf8(oldText, MAX_EDITABLE_FILE_BYTES)
+                encodeStrictUtf8(newText, MAX_EDITABLE_FILE_BYTES)
+
+                val before = workspace.inspectFileState(projectName, relativePath, MAX_EDITABLE_FILE_BYTES)
+                if (!before.exists) {
+                    throw IllegalArgumentException("File inesistente: ${before.normalizedPath}")
+                }
+                val beforeText = decodeStrictUtf8(before.bytes!!)
+                val readKey = projectName to before.normalizedPath
+                val obs = observedAgentReads[readKey]
+                if (obs != null && (obs.sha256 == null || obs.sha256 != before.sha256)) {
+                    throw ConcurrentWorkspaceEditException(
+                        "Conflitto: '${before.normalizedPath}' è stato modificato esternamente dopo l'ultima lettura. Rileggilo prima di applicare la patch."
+                    )
+                }
+
+                val firstIdx = beforeText.indexOf(oldText)
+                if (firstIdx < 0) {
+                    throw IllegalStateException("Testo target non trovato in ${before.normalizedPath}")
+                }
+                if (beforeText.lastIndexOf(oldText) != firstIdx) {
+                    throw IllegalStateException(
+                        "Testo target ambiguo in ${before.normalizedPath} (trovate più occorrenze). Includi più contesto."
+                    )
+                }
+
+                val updatedText = beforeText.substring(0, firstIdx) +
+                    newText +
+                    beforeText.substring(firstIdx + oldText.length)
+                val newBytes = encodeStrictUtf8(updatedText, MAX_EDITABLE_FILE_BYTES)
+                val newSha = sha256Hex(newBytes)
+
+                if (newSha == before.sha256) {
+                    return@runCatching WorkspaceMutationResult(
+                        projectName = projectName,
+                        normalizedPath = before.normalizedPath,
+                        snapshotId = null,
+                        changed = false,
+                        existedBefore = true,
+                        existsAfter = true,
+                        newSha256 = newSha,
+                        lineCount = countTextLines(updatedText),
+                        diff = "Nessuna modifica (file invariato)."
+                    )
+                }
+
+                val diff = buildBoundedUnifiedDiff(
+                    relativePath = before.normalizedPath,
+                    beforeExists = true,
+                    beforeBytes = before.bytes,
+                    afterExists = true,
+                    afterBytes = newBytes
+                )
+
+                // Persist reversible checkpoint BEFORE touching the target file on disk.
+                val snapshotId = db.workspaceSnapshotDao().insertSnapshot(
+                    WorkspaceSnapshotEntity(
+                        projectName = projectName,
+                        relativePath = before.normalizedPath,
+                        previousContent = beforeText,
+                        newContent = updatedText,
+                        summary = summary ?: "Patch su ${before.normalizedPath}",
+                        timestamp = System.currentTimeMillis(),
+                        previousExisted = true,
+                        previousBytes = before.bytes,
+                        afterSha256 = newSha
+                    )
+                )
+
+                try {
+                    workspace.writeBytesChecked(
+                        targetFile = before.file,
+                        newBytes = newBytes,
+                        expectedBeforeExists = true,
+                        expectedBeforeSha256 = before.sha256,
+                        beforeSwap = beforeFileWriteSwapForTest?.let { hook ->
+                            { hook(projectName, before.normalizedPath, snapshotId) }
+                        }
+                    )
+                } catch (e: Throwable) {
+                    if (workspace.diskMatchesState(before.file, true, before.sha256)) {
+                        runCatching { db.workspaceSnapshotDao().deleteSnapshot(snapshotId) }
+                    }
+                    throw e
+                }
+
+                // Patching never promotes a partial/unseen file into a full read for subsequent overwrites.
+                observedAgentReads[readKey] = ObservedReadState(
+                    sha256 = newSha,
+                    sizeBytes = newBytes.size.toLong(),
+                    isPartial = obs?.isPartial ?: true
+                )
+
+                WorkspaceMutationResult(
+                    projectName = projectName,
+                    normalizedPath = before.normalizedPath,
+                    snapshotId = snapshotId,
+                    changed = true,
+                    existedBefore = true,
+                    existsAfter = true,
+                    newSha256 = newSha,
+                    lineCount = countTextLines(updatedText),
+                    diff = diff
+                )
+            }
+        }
+    }
+
+    suspend fun undoLatestWorkspaceChange(
+        projectName: String,
+        relativePath: String = ""
+    ): Result<WorkspaceMutationResult> = withContext(Dispatchers.IO) {
+        workspaceMutex.withLock {
+            runCatching {
+                val latest = if (relativePath.isNotBlank()) {
+                    val normalized = workspace.normalizeRelativePath(projectName, relativePath)
+                        ?: throw SecurityException("Percorso non valido: $relativePath")
+                    db.workspaceSnapshotDao().getLatestSnapshot(projectName, normalized)
+                } else {
+                    db.workspaceSnapshotDao().getLatestProjectSnapshot(projectName)
+                } ?: throw IllegalStateException("Nessuno snapshot disponibile per il ripristino.")
+
+                val current = try {
+                    workspace.inspectFileState(latest.projectName, latest.relativePath, MAX_EDITABLE_FILE_BYTES)
+                } catch (e: IllegalArgumentException) {
+                    throw ConcurrentWorkspaceEditException(
+                        "Conflitto durante l'annullamento: '${latest.relativePath}' non corrisponde più allo snapshot (${e.message}). Checkpoint conservato."
+                    )
+                }
+
+                val expectedCurrentSha = latest.afterSha256
+                    ?: sha256Hex(latest.newContent.toByteArray(Charsets.UTF_8))
+
+                if (!current.exists || current.sha256 != expectedCurrentSha) {
+                    throw ConcurrentWorkspaceEditException(
+                        "Conflitto durante l'annullamento: '${latest.relativePath}' è stato modificato o rimosso esternamente dopo lo snapshot. Checkpoint conservato."
+                    )
+                }
+
+                val targetExists: Boolean
+                val targetBytes: ByteArray?
+                when (latest.previousExisted) {
+                    false -> {
+                        // Explicitly absent before write -> restore by deleting the created file.
+                        targetExists = false
+                        targetBytes = null
+                    }
+                    true -> {
+                        // Explicitly existed before write (including 0-byte empty file) -> restore exact bytes.
+                        targetExists = true
+                        targetBytes = latest.previousBytes ?: latest.previousContent.toByteArray(Charsets.UTF_8)
+                    }
+                    null -> {
+                        // Legacy v3 snapshot: never guess deletion; restore previousContent bytes.
+                        targetExists = true
+                        targetBytes = latest.previousContent.toByteArray(Charsets.UTF_8)
+                    }
+                }
+
+                val diff = buildBoundedUnifiedDiff(
+                    relativePath = latest.relativePath,
+                    beforeExists = true,
+                    beforeBytes = current.bytes,
+                    afterExists = targetExists,
+                    afterBytes = targetBytes
+                )
+
+                val beforeUndoHook: (suspend () -> Unit)? = beforeUndoRestoreForTest?.let { hook ->
+                    suspend { hook(latest.projectName, latest.relativePath, latest.id) }
+                }
+
+                // Restore on disk FIRST; if anything fails, checkpoint is preserved in Room.
+                if (!targetExists) {
+                    workspace.deleteFileChecked(
+                        targetFile = current.file,
+                        expectedSha256 = expectedCurrentSha,
+                        beforeDelete = beforeUndoHook
+                    )
+                } else {
+                    workspace.writeBytesChecked(
+                        targetFile = current.file,
+                        newBytes = targetBytes!!,
+                        expectedBeforeExists = true,
+                        expectedBeforeSha256 = expectedCurrentSha,
+                        beforeSwap = beforeUndoHook
+                    )
+                }
+
+                // Only consume the checkpoint AFTER byte-exact restore/deletion has succeeded.
+                db.workspaceSnapshotDao().deleteSnapshot(latest.id)
+
+                val readKey = latest.projectName to latest.relativePath
+                val newSha = targetBytes?.let(::sha256Hex)
+                if (!targetExists) {
+                    observedAgentReads.remove(readKey)
+                } else {
+                    val prevObs = observedAgentReads[readKey]
+                    if (prevObs != null) {
+                        observedAgentReads[readKey] = ObservedReadState(
+                            sha256 = newSha,
+                            sizeBytes = targetBytes!!.size.toLong(),
+                            isPartial = prevObs.isPartial
+                        )
+                    }
+                }
+
+                val restoredLineCount = if (targetExists) {
+                    val txt = runCatching { decodeStrictUtf8(targetBytes!!) }.getOrElse { String(targetBytes!!, Charsets.UTF_8) }
+                    countTextLines(txt)
+                } else 0
+
+                WorkspaceMutationResult(
+                    projectName = latest.projectName,
+                    normalizedPath = latest.relativePath,
+                    snapshotId = latest.id,
+                    changed = true,
+                    existedBefore = true,
+                    existsAfter = targetExists,
+                    newSha256 = newSha,
+                    lineCount = restoredLineCount,
+                    diff = diff
+                )
+            }
+        }
+    }
 
     suspend fun recordSnapshot(
         projectName: String,
         relativePath: String,
         previousContent: String,
         newContent: String,
-        summary: String
-    ) {
-        db.workspaceSnapshotDao().insertSnapshot(
-            WorkspaceSnapshotEntity(
-                projectName = projectName,
-                relativePath = relativePath,
-                previousContent = previousContent,
-                newContent = newContent,
-                summary = summary
-            )
+        summary: String,
+        previousExisted: Boolean? = null,
+        previousBytes: ByteArray? = null,
+        afterSha256: String? = null
+    ): Long = db.workspaceSnapshotDao().insertSnapshot(
+        WorkspaceSnapshotEntity(
+            projectName = projectName,
+            relativePath = relativePath,
+            previousContent = previousContent,
+            newContent = newContent,
+            summary = summary,
+            previousExisted = previousExisted,
+            previousBytes = previousBytes,
+            afterSha256 = afterSha256
         )
-    }
+    )
 
-    suspend fun rollbackLatestSnapshot(projectName: String, relativePath: String): Boolean {
-        val latest = db.workspaceSnapshotDao().getLatestSnapshot(projectName, relativePath)
-            ?: return false
-        workspace.writeFile(projectName, relativePath, latest.previousContent)
-        db.workspaceSnapshotDao().deleteSnapshot(latest.id)
-        return true
-    }
+    suspend fun rollbackLatestSnapshot(projectName: String, relativePath: String): Boolean =
+        undoLatestWorkspaceChange(projectName, relativePath).isSuccess
 
     // --- Automations ---
     suspend fun upsertAutomation(task: AutomationTaskEntity): Long = db.automationDao().upsertTask(task)
@@ -513,7 +991,7 @@ class MobHarnRepository(
                 instructionsMd = """
                     # Skill: Coding Workflow
                     1. Ispeziona prima il progetto con `list_workspace_files` e leggi le righe interessate con `read_file_lines`.
-                    2. Per modifiche chirurgiche usa `patch_workspace_file`; per nuovi file usa `write_workspace_file`.
+                    2. Per modifiche chirurgiche usa `patch_workspace_file`; per nuovi file (o file letti per intero) usa `write_workspace_file`; per annullare usa `undo_workspace_file`.
                     3. Se scrivi logica JavaScript ES6+ o algoritmi, esegui subito un test reale tramite `run_js_sandbox` verificando l'output e l'assenza di eccezioni.
                     4. Se lavori su schemi o query SQL, verifica con `run_sql_sandbox`.
                     5. Riassumi all'utente i file toccati, i test eseguiti e se è pronta la Live Preview in Studio.

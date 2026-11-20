@@ -18,7 +18,7 @@ import androidx.room.RoomDatabase
         ToolExecutionLogEntity::class,
         CustomToolEntity::class
     ],
-    version = 3,
+    version = 4,
     exportSchema = true
 )
 abstract class MobHarnDatabase : RoomDatabase() {
@@ -38,20 +38,24 @@ abstract class MobHarnDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_3_4 = object : androidx.room.migration.Migration(3, 4) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE workspace_snapshots ADD COLUMN previousExisted INTEGER")
+                db.execSQL("ALTER TABLE workspace_snapshots ADD COLUMN previousBytes BLOB")
+                db.execSQL("ALTER TABLE workspace_snapshots ADD COLUMN afterSha256 TEXT")
+            }
+        }
+
         @Volatile
         private var INSTANCE: MobHarnDatabase? = null
 
-        fun getInstance(context: Context): MobHarnDatabase {
-            return INSTANCE ?: synchronized(this) {
-                INSTANCE ?: Room.databaseBuilder(
-                    context.applicationContext,
-                    MobHarnDatabase::class.java,
-                    "mobharn.db"
-                )
-                    .addMigrations(MIGRATION_2_3)
-                    .build()
-                    .also { INSTANCE = it }
-            }
+        internal fun open(context: Context, name: String): MobHarnDatabase =
+            Room.databaseBuilder(context.applicationContext, MobHarnDatabase::class.java, name)
+                .addMigrations(MIGRATION_2_3, MIGRATION_3_4)
+                .build()
+
+        fun getInstance(context: Context): MobHarnDatabase = INSTANCE ?: synchronized(this) {
+            INSTANCE ?: open(context, "mobharn.db").also { INSTANCE = it }
         }
     }
 }
