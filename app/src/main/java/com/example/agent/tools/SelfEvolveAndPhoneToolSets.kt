@@ -261,6 +261,7 @@ class PhoneUseToolSet(
     ): String = monitor.executeTracked(
         toolName = "phone_global_action",
         category = ToolGroup.PHONE_USE.id,
+        exactCommand = when (action) { "recents", "recenti" -> listOf("recents"); "home" -> listOf("home"); else -> null },
         argsSummary = "global $action",
         isExternalOrMutating = true,
         approvalDescription = "Eseguire l'azione di sistema '$action' sul Pixel?"

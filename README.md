@@ -8,6 +8,12 @@ L'app esegue inferenza locale con supporto **NPU (Google Tensor G5+ AOT), GPU e 
 
 ---
 
+## Approvazioni mentre usi un'altra app
+
+In **Studio → Strumenti** mantieni attiva la richiesta di approvazione e tocca **Notifiche** per consentire gli avvisi Android. Se MobHarn è in background, espandi la notifica: **Approva** vale una volta, **Rifiuta** non esegue l'azione. Una richiesta senza risposta scade dopo due minuti. In primo piano resta il dialogo chat. Le notifiche non mantengono il processo in vita.
+
+Per **Home**, **Recenti** e le **sveglie con orario ed etichetta identici** puoi scegliere **Salva e approva**. La regola vale sul solo dispositivo sbloccato, anche dopo il riavvio dell'app; in Studio puoi revocare tutte le approvazioni salvate. Per tocchi, digitazione, invii e modifiche al comportamento dell'agente non viene mai offerto il salvataggio. Le decisioni non cambiano i permessi Android e non riattivano un servizio disabilitato.
+
 ## Funzionalità principali
 
 ### 1. Chat & Timeline Live dell'Agente

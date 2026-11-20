@@ -57,6 +57,8 @@ class StudioViewModel(
 ) : ViewModel() {
 
     private val repo = container.repository
+    fun clearRememberedApprovals() = container.approvalCoordinator.clearRemembered()
+
     private val workspace = repo.workspace
     private val sandbox = container.codeSandbox
 

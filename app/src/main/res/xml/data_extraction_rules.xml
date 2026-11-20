@@ -6,11 +6,13 @@
         <exclude domain="file" path="mobharn_vault" />
         <exclude domain="file" path="workspace" />
         <!-- Exclude large replaceable LiteRT model weights -->
+        <exclude domain="sharedpref" path="approval_rules.xml" />
         <exclude domain="file" path="litertlm_models" />
     </cloud-backup>
     <device-transfer>
         <!-- Direct phone-to-phone migration preserves user databases, vault notes, and workspaces,
              but excludes large replaceable model weights to conserve bandwidth and storage -->
+        <exclude domain="sharedpref" path="approval_rules.xml" />
         <exclude domain="file" path="litertlm_models" />
     </device-transfer>
 </data-extraction-rules>

@@ -90,7 +90,7 @@ class PhoneTypingPrivacyRegressionTest {
         assertEquals("type in 'Notes'", pending.argumentsSummary)
 
         // User refuses
-        approvalCoordinator.resolve(false)
+        approvalCoordinator.resolve(pending!!.id, false)
 
         val result = deferredResult.await()
         assertEquals("Azione rifiutata dall'utente.", result)
@@ -146,7 +146,7 @@ class PhoneTypingPrivacyRegressionTest {
         assertEquals("type in 'Subject'", pending.argumentsSummary)
 
         // User approves
-        approvalCoordinator.resolve(true)
+        approvalCoordinator.resolve(pending!!.id, true)
 
         val result = deferredResult.await()
         assertFalse(
@@ -195,7 +195,7 @@ class PhoneTypingPrivacyRegressionTest {
         assertEquals("type in active field", pending!!.argumentsSummary)
         assertFalse(pending.argumentsSummary.contains(harmlessMarker))
 
-        approvalCoordinator.resolve(false)
+        approvalCoordinator.resolve(pending!!.id, false)
         deferredResult.await()
 
         val logs = repository.toolLogsFlow.first()

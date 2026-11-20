@@ -256,12 +256,17 @@ fun ChatScreen(
     // Tool Approval Gate Dialog
     pendingApproval?.let { approval ->
         AlertDialog(
-            onDismissRequest = { viewModel.resolveToolApproval(false) },
+            onDismissRequest = { viewModel.resolveToolApproval(approval.id, false) },
             icon = { Icon(Icons.Default.Security, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
             title = { Text("Conferma azione") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(approval.description, style = MaterialTheme.typography.bodyMedium)
+                    if (approval.rememberKey != null) {
+                        OutlinedButton(onClick = { viewModel.resolveToolApproval(approval.id, true, remember = true) }) {
+                            Text("Salva e approva questo comando")
+                        }
+                    }
                     Surface(
                         color = MaterialTheme.colorScheme.surfaceContainerHigh,
                         shape = RoundedCornerShape(12.dp)
@@ -277,14 +282,14 @@ fun ChatScreen(
                 Button(
                     onClick = {
                         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                        viewModel.resolveToolApproval(true)
+                        viewModel.resolveToolApproval(approval.id, true)
                     },
                     modifier = Modifier.testTag("approve_tool_button")
                 ) { Text("Consenti") }
             },
             dismissButton = {
                 OutlinedButton(
-                    onClick = { viewModel.resolveToolApproval(false) },
+                    onClick = { viewModel.resolveToolApproval(approval.id, false) },
                     modifier = Modifier.testTag("deny_tool_button")
                 ) { Text("Rifiuta") }
             }

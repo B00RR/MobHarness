@@ -89,6 +89,7 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         if (::container.isInitialized) {
+            container.approvalNotifications.foreground.value = true
             container.runtimeManager.onAppForegrounded()
         }
     }
@@ -96,6 +97,7 @@ class MainActivity : ComponentActivity() {
     override fun onStop() {
         super.onStop()
         if (::container.isInitialized && !isChangingConfigurations) {
+            container.approvalNotifications.foreground.value = false
             // Flip background flag synchronously so any running inference yields CPU/GPU immediately
             container.runtimeManager.markBackgroundStateImmediate(true)
             container.systemActions.evictIdleConnections()

@@ -291,6 +291,7 @@ fun StudioScreen(
                     isTesting = uiState.isTestingTool,
                     logs = toolLogs,
                     onToggleGroup = viewModel::toggleToolGroup,
+                    onClearApprovals = { viewModel.clearRememberedApprovals(); onShowMessage("Approvazioni salvate revocate.") },
                     onToggleApproval = viewModel::setRequireApproval,
                     onRunTest = viewModel::runDirectToolTest,
                     onClearLogs = viewModel::clearToolLogs,
@@ -687,6 +688,7 @@ private fun ToolsAndTesterTab(
     isTesting: Boolean,
     logs: List<com.example.data.db.ToolExecutionLogEntity>,
     onToggleGroup: (String, Boolean) -> Unit,
+    onClearApprovals: () -> Unit,
     onToggleApproval: (Boolean) -> Unit,
     onRunTest: (String, String) -> Unit,
     onClearLogs: () -> Unit,
@@ -738,6 +740,7 @@ private fun ToolsAndTesterTab(
 
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.25f))
 
+                    OutlinedButton(onClick = onClearApprovals) { Text("Revoca le approvazioni salvate") }
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
