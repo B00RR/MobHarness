@@ -140,7 +140,7 @@ gradle :app:testDebugUnitTest
 - **Verifiche:** [97 test superati](https://github.com/B00RR/MobHarness/actions/runs/44784762505) sul commit `19062b8`. [Su emulatore](https://github.com/B00RR/MobHarness/actions/runs/44784774319) sono stati verificati l’aggiornamento dalla 1.2.0 con dati sintetici e due passaggi di navigazione seguiti dalla lettura di un interruttore, acceso e spento, senza modificarlo. Queste prove chiamano direttamente gli strumenti: non verificano le scelte di Gemma dalla chat.
 - **Limite noto:** in una prova dalla chat, Gemma ha sostituito `blu` con un’intera frase, duplicandone una parte. Ha poi riportato il testo atteso invece di quello riletto dal file. Verifica il diff o riapri il file in Studio prima di accettare una modifica importante.
 
-[Fonti e riferimenti per gli strumenti mobili](docs/fonti-harness-mobile.md)
+[Piano originale della 1.3.0](docs/piano-mobharn-1.3.0.md) · [Fonti e riferimenti per gli strumenti mobili](docs/fonti-harness-mobile.md)
 
 ### `v1.2.0` (`versionCode 5`)
 
